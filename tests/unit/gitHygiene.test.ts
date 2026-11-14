@@ -66,10 +66,14 @@ describe('src/scripts is not shadowed by the scripts/ ignore rule', () => {
 
 describe('no credentials are tracked', () => {
   test('no .env or credential file appears in git ls-files', () => {
+    // .env.example is the one .env-prefixed file that SHOULD be tracked: it is
+    // the committed template and is asserted to be secret-free above.
     const bad = trackedFiles().filter(f =>
-      /(^|\/)\.env($|\.)/.test(f) ||
-      /(^|\/)\.accounts\//.test(f) ||
-      /google-service-account\.json$/.test(f),
+      f !== '.env.example' && (
+        /(^|\/)\.env($|\.)/.test(f) ||
+        /(^|\/)\.accounts\//.test(f) ||
+        /google-service-account\.json$/.test(f)
+      ),
     );
     assert.deepEqual(bad, []);
   });
