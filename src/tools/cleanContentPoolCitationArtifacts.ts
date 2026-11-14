@@ -10,8 +10,9 @@
 import 'dotenv/config';
 import { google } from 'googleapis';
 import fs from 'fs';
+import { MAIN_SHEET_ID } from '../config/sheetIds.js';
 
-const SPREADSHEET_ID = '1p_N3zzJbUx-7t8sjuAtbQsHaUfVmYxytQU_gDd2MGwQ';
+const SPREADSHEET_ID = MAIN_SHEET_ID;
 const SHEET_NAME = 'Content Pool';
 // Matches the SHAPE of ChatGPT's internal tool/citation markup
 // (":word-word[optional-bracket]{attrs}"), not one fixed name — ChatGPT has

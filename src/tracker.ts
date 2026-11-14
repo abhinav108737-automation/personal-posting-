@@ -9,10 +9,11 @@
 
 import { google } from 'googleapis';
 import 'dotenv/config';
+import { MAIN_SHEET_ID } from './config/sheetIds.js';
 
 // ──── Sheet config ────────────────────────────────────────────────────────
 
-const SHEET_ID = '1p_N3zzJbUx-7t8sjuAtbQsHaUfVmYxytQU_gDd2MGwQ';
+const SHEET_ID = MAIN_SHEET_ID;
 
 const SHEETS = [
   { name: 'Social Media', type: 'social' as const },

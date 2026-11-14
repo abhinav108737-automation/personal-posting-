@@ -15,8 +15,9 @@ import 'dotenv/config';
 import { google } from 'googleapis';
 import fs from 'fs';
 import { appendRowsToContentPool } from '../sheets/sheets.js';
+import { MAIN_SHEET_ID } from '../config/sheetIds.js';
 
-const SPREADSHEET_ID = '1p_N3zzJbUx-7t8sjuAtbQsHaUfVmYxytQU_gDd2MGwQ';
+const SPREADSHEET_ID = MAIN_SHEET_ID;
 const SOCIAL_SHEET_NAME = 'Social Media';
 const CONTENT_POOL_SHEET_NAME = 'Content Pool';
 

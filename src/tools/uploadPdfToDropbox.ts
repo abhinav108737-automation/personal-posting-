@@ -2,8 +2,9 @@ import 'dotenv/config';
 import { google } from 'googleapis';
 import fs from 'fs';
 import { uploadFileToDropbox } from '../utils/dropboxUpload.js';
+import { MAIN_SHEET_ID } from '../config/sheetIds.js';
 
-const BLOG_SHEET_ID = '1p_N3zzJbUx-7t8sjuAtbQsHaUfVmYxytQU_gDd2MGwQ';
+const BLOG_SHEET_ID = MAIN_SHEET_ID;
 const BLOG_SHEET_NAME = 'Blogs';
 
 interface PdfRow {

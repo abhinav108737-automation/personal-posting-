@@ -7,8 +7,9 @@
  */
 import 'dotenv/config';
 import { google } from 'googleapis';
+import { MAIN_SHEET_ID } from '../config/sheetIds.js';
 
-const SHEET_ID = '1p_N3zzJbUx-7t8sjuAtbQsHaUfVmYxytQU_gDd2MGwQ';
+const SHEET_ID = MAIN_SHEET_ID;
 
 async function getSheetsClient() {
   const auth = new google.auth.GoogleAuth({

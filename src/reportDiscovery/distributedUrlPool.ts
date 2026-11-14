@@ -20,8 +20,9 @@
 import fs from 'fs';
 import path from 'path';
 import { google } from 'googleapis';
+import { DISTRIBUTED_URL_SHEET_ID as RESOLVED_DISTRIBUTED_URL_SHEET_ID } from '../config/sheetIds.js';
 
-const DISTRIBUTED_URL_SHEET_ID = '1ZbEcDaK-zb6U1SK1P23UIjezN5NGdy3R15r9W-glVlU';
+const DISTRIBUTED_URL_SHEET_ID = RESOLVED_DISTRIBUTED_URL_SHEET_ID;
 const TAB_ORDER = ['Report R.S', 'Report R.V', 'Report R.P', 'Report R.A'];
 
 export type PoolPurpose = 'newLogic' | 'socialMedia';
