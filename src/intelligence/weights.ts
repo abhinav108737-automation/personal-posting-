@@ -130,15 +130,70 @@ export function loadWeights(env: NodeJS.ProcessEnv = process.env): ScoreWeights 
   }
 }
 
+/**
+ * Bounds for every interlink limit: [minimum, maximum, integerOnly].
+ *
+ * A limit that is not a usable number is NOT a licence to do the thing without
+ * a limit. An override of `"none"`, `null`, `NaN` or `-1` used to flow straight
+ * into `Math.max(0, limit)` and produce NaN, and every `count >= NaN` test is
+ * false — which silently removed the cap entirely. Garbage in now means the
+ * DEFAULT, loudly, never "unlimited".
+ */
+const INTERLINK_LIMIT_BOUNDS: Record<keyof InterlinkLimits, [number, number, boolean]> = {
+  maxNewLinksPerSourcePage:     [0, 100,   true],
+  maxLinksAddedPerRun:          [0, 1000,  true],
+  maxLinksPerDestinationPerWeek:[0, 1000,  true],
+  minRelevanceToPropose:        [0, 1,     false],
+  minParagraphWords:            [0, 10000, true],
+  cooldownHours:                [0, 8760,  false],
+};
+
+/**
+ * Coerce one override into a usable limit, or fall back to the default.
+ * Clamping is deliberate: an out-of-range override is a typo, and the safe
+ * reading of a typo is the nearest value that still bounds the blast radius.
+ */
+export function sanitiseInterlinkLimits(
+  raw: unknown,
+  warn: (msg: string) => void = (m) => console.warn(m),
+): InterlinkLimits {
+  const out: InterlinkLimits = { ...DEFAULT_INTERLINK_LIMITS };
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+
+  for (const key of Object.keys(INTERLINK_LIMIT_BOUNDS) as Array<keyof InterlinkLimits>) {
+    if (!Object.prototype.hasOwnProperty.call(raw, key)) continue;
+    const value = (raw as Record<string, unknown>)[key];
+    const [min, max, intOnly] = INTERLINK_LIMIT_BOUNDS[key];
+
+    // Only a real number counts. A numeric STRING is still a configuration
+    // error, and guessing what "3" meant is how a cap quietly disappears.
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      warn(`[weights] INTERLINK_LIMITS_JSON.${key} is not a finite number (${JSON.stringify(value)}) — using the default ${DEFAULT_INTERLINK_LIMITS[key]}.`);
+      continue;
+    }
+
+    let v = intOnly ? Math.floor(value) : value;
+    if (v < min || v > max) {
+      const clamped = Math.min(max, Math.max(min, v));
+      warn(`[weights] INTERLINK_LIMITS_JSON.${key}=${value} is outside [${min}, ${max}] — clamped to ${clamped}.`);
+      v = clamped;
+    }
+    out[key] = v;
+  }
+  return out;
+}
+
 export function loadInterlinkLimits(env: NodeJS.ProcessEnv = process.env): InterlinkLimits {
   const raw = (env.INTERLINK_LIMITS_JSON ?? '').trim();
   if (!raw) return { ...DEFAULT_INTERLINK_LIMITS };
+  let parsed: unknown;
   try {
-    return { ...DEFAULT_INTERLINK_LIMITS, ...JSON.parse(raw) };
+    parsed = JSON.parse(raw);
   } catch {
     console.warn('[weights] INTERLINK_LIMITS_JSON is not valid JSON — using defaults.');
     return { ...DEFAULT_INTERLINK_LIMITS };
   }
+  return sanitiseInterlinkLimits(parsed);
 }
 
 /** Positive weights should sum to ~1.0. Used by tests and by calibration. */

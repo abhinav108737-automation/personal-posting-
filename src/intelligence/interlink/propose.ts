@@ -28,7 +28,7 @@ import type { DB } from '../db.js';
 import { nowIso } from '../db.js';
 import { enabled } from '../flags.js';
 import {
-  loadInterlinkLimits, DEFAULT_THRESHOLDS,
+  loadInterlinkLimits, sanitiseInterlinkLimits, DEFAULT_THRESHOLDS,
   type InterlinkLimits, type Thresholds,
 } from '../weights.js';
 import { canApplyInterlinks } from '../platforms.js';
@@ -693,7 +693,9 @@ export interface GenerateOptions {
  * flag off this is a no-op that writes nothing.
  */
 export async function generateProposals(opts: GenerateOptions): Promise<GenerateResult> {
-  const limits = opts.limits ?? loadInterlinkLimits();
+  // Sanitise even a caller-supplied limits object: a limit that reads as NaN
+  // makes every `>=` comparison false, which silently removes the cap.
+  const limits = sanitiseInterlinkLimits(opts.limits ?? loadInterlinkLimits());
   const skipped: Record<string, number> = {};
   const bump = (r: SkipReason) => { skipped[r] = (skipped[r] ?? 0) + 1; };
   const empty = (): GenerateResult => ({ created: 0, considered: 0, skipped, proposals: [], limits });
@@ -707,7 +709,13 @@ export async function generateProposals(opts: GenerateOptions): Promise<Generate
   const now = opts.now ?? new Date();
   const nowStr = now.toISOString();
   const weekAgo = new Date(now.getTime() - 7 * 24 * 3_600_000).toISOString();
-  const runCap = Math.max(0, Math.min(opts.limit ?? limits.maxLinksAddedPerRun, limits.maxLinksAddedPerRun));
+  // The explicit --limit may only TIGHTEN the configured cap, never raise it,
+  // and a non-finite --limit (e.g. parseInt of a typo) is ignored rather than
+  // allowed to poison Math.min into NaN and remove the cap altogether.
+  const askedLimit = typeof opts.limit === 'number' && Number.isFinite(opts.limit)
+    ? Math.max(0, Math.floor(opts.limit))
+    : limits.maxLinksAddedPerRun;
+  const runCap = Math.min(askedLimit, limits.maxLinksAddedPerRun);
 
   const sources = selectSources({ db, limit: opts.sourceLimit ?? 200 });
   const destinations = selectDestinations({ db, limit: opts.destinationLimit ?? 200 });

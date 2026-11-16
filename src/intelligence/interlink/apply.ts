@@ -31,8 +31,8 @@ import { nowIso, type DB } from '../db.js';
 import { enabled as realEnabled, mayMutateExternally as realMayMutate } from '../flags.js';
 import { canApplyInterlinks } from '../platforms.js';
 import {
-  DEFAULT_INTERLINK_LIMITS,
   loadInterlinkLimits,
+  sanitiseInterlinkLimits,
   type InterlinkLimits,
 } from '../weights.js';
 import { defaultAdapters, type AdapterResolver, type PlatformEditAdapter } from './adapters.js';
@@ -152,7 +152,12 @@ export function protectedRanges(text: string): Array<[number, number]> {
     /!?\[[^\]]*\]\[[^\]]*\]/g,    // reference-style link / image
     /^\s*\[[^\]]+\]:\s*\S+.*$/gm, // link reference definition
     /<a\b[^>]*>[\s\S]*?<\/a>/gi,  // raw HTML anchor
-    /<[^>\s]+>/g,                 // autolink / HTML tag
+    // Any HTML tag INCLUDING its attributes. The previous pattern was
+    // /<[^>\s]+>/ which stops at the first space, so `<img alt="our market
+    // report">` was NOT protected and a link got injected inside the attribute,
+    // corrupting already-published markup. Attribute text is never prose.
+    /<\/?[A-Za-z][^>]*>/g,        // HTML tag with attributes
+    /<[^>\s]+>/g,                 // autolink (<https://…>, <a@b.com>)
     /https?:\/\/\S+/g,            // bare URL
   ];
   for (const re of patterns) {
@@ -376,12 +381,14 @@ export interface ApplyOptions {
 export async function applyApproved(opts: ApplyOptions): Promise<ApplySummary> {
   const db = opts.db;
   const dryRun = opts.dryRun !== false;           // default TRUE
-  const limits = opts.limits ?? loadInterlinkLimits();
+  // Sanitise even a caller-supplied limits object. TypeScript does not survive
+  // a JSON round trip, and a cap that reads as NaN is a cap that never fires.
+  const limits = sanitiseInterlinkLimits(opts.limits ?? loadInterlinkLimits());
   const resolve = opts.adapters ?? defaultAdapters;
   const gate = opts.gate ?? realGate;
   const editable = opts.editable ?? canApplyInterlinks;
 
-  const maxPerRun = Math.max(0, limits.maxLinksAddedPerRun ?? DEFAULT_INTERLINK_LIMITS.maxLinksAddedPerRun);
+  const maxPerRun = limits.maxLinksAddedPerRun;
 
   const rows: ProposalRow[] = opts.ids?.length
     ? opts.ids.map(id => getProposal(db, id)).filter((r): r is ProposalRow => !!r)
