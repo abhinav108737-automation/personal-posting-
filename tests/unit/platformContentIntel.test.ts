@@ -1,0 +1,216 @@
+/**
+ * Platform intelligence and content intelligence. Temp-file database only.
+ */
+import { test, describe, beforeEach, afterEach } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { openDb, nowIso } from '../../src/intelligence/db.js';
+import {
+  indexationRate, computePlatformStats, recommend, persistPlatformStats,
+  formatPlatformReport,
+} from '../../src/intelligence/platformIntelligence.js';
+import {
+  stripHtml, countWords, fleschReadingEase, extractFeatures, pearson,
+  describeCorrelation, saveContentStats, correlateFeatures, refreshOutcomes,
+} from '../../src/intelligence/contentIntelligence.js';
+import { DEFAULT_THRESHOLDS } from '../../src/intelligence/weights.js';
+
+let dir: string, db: any;
+beforeEach(() => {
+  dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ken-pi-'));
+  db = openDb(path.join(dir, 'x.db'));
+});
+afterEach(() => { try { db.close(); } catch {} fs.rmSync(dir, { recursive: true, force: true }); });
+
+function addPost(platform: string, url: string, postedAt = '2026-11-01T00:00:00Z') {
+  db.prepare(`INSERT INTO published_posts (report_url, platform, published_url, posted_at, created_at)
+    VALUES (?,?,?,?,?)`).run('https://kenresearch.com/r', platform, url, postedAt, nowIso());
+}
+function addIndexation(url: string, status: string) {
+  db.prepare(`INSERT INTO indexation_checks (url, checked_at, status, confidence)
+    VALUES (?,?,?,?)`).run(url, nowIso(), status, 0.8);
+}
+
+describe('indexation rate excludes unknowns', () => {
+  test('unknowns do not count as failures', () => {
+    // 5 indexed, 5 not indexed, 90 unknown -> 50%, NOT 5%.
+    assert.equal(indexationRate(5, 5), 0.5);
+  });
+  test('no known results at all gives null, not zero', () => {
+    assert.equal(indexationRate(0, 0), null);
+  });
+});
+
+describe('platform recommendations', () => {
+  const base = {
+    platform: 'Medium', windowStart: '2026-08-01', windowEnd: '2026-11-01',
+    posts: 100, postsIndexed: 80, postsNotIndexed: 20, postsUnknown: 0,
+    sessions: 500, clicks: 0, impressions: 0, leads: 0,
+    indexationRate: 0.8, sessionsPerPost: 5, leadsPerPost: 0, dataCoverage: 1,
+  };
+
+  test('a tiny sample is never judged', () => {
+    const v = recommend({ ...base, posts: 3 });
+    assert.equal(v.recommendation, 'insufficient-data');
+    assert.equal(v.confidence, 'low');
+  });
+
+  test('no traffic AND no lead data means insufficient, not failure', () => {
+    const v = recommend({ ...base, sessionsPerPost: null, leadsPerPost: null });
+    assert.equal(v.recommendation, 'insufficient-data');
+    assert.match(v.reasons.join(' '), /cannot assess/);
+  });
+
+  test('producing leads always means keep, whatever the traffic', () => {
+    const v = recommend({ ...base, sessionsPerPost: 0.01, leads: 4, leadsPerPost: 0.04 });
+    assert.equal(v.recommendation, 'keep');
+    assert.equal(v.confidence, 'high');
+  });
+
+  test('poor traffic plus zero leads on a real sample suggests dropping', () => {
+    const v = recommend({ ...base, sessionsPerPost: 0.05, leadsPerPost: 0 });
+    assert.equal(v.recommendation, 'consider-dropping');
+    assert.match(v.reasons.join(' '), /sessions\/post/);
+  });
+
+  test('healthy traffic means keep', () => {
+    assert.equal(recommend(base).recommendation, 'keep');
+  });
+
+  test('low indexation with acceptable traffic flags investigation, not dropping', () => {
+    const v = recommend({ ...base, indexationRate: 0.1, leadsPerPost: null });
+    assert.equal(v.recommendation, 'investigate');
+  });
+
+  test('thin data lowers confidence even for a clear verdict', () => {
+    const v = recommend({ ...base, sessionsPerPost: 0.01, leadsPerPost: 0, dataCoverage: 0.25 });
+    assert.equal(v.recommendation, 'consider-dropping');
+    assert.equal(v.confidence, 'medium', 'low coverage must not yield high confidence');
+  });
+});
+
+describe('platform stats from the store', () => {
+  test('counts posts and indexation per platform', () => {
+    addPost('HackMD', 'https://hackmd.io/a');
+    addPost('HackMD', 'https://hackmd.io/b');
+    addIndexation('https://hackmd.io/a', 'indexed');
+    addIndexation('https://hackmd.io/b', 'unknown');
+
+    const stats = computePlatformStats({ db, windowDays: 365, endDate: '2026-11-16' });
+    const hackmd = stats.find(s => s.platform === 'HackMD')!;
+    assert.equal(hackmd.posts, 2);
+    assert.equal(hackmd.postsIndexed, 1);
+    assert.equal(hackmd.postsUnknown, 1);
+    assert.equal(hackmd.indexationRate, 1, 'one indexed, zero not-indexed, unknown excluded');
+  });
+
+  test('an empty store leaves every platform at zero posts and null ratios', () => {
+    const stats = computePlatformStats({ db, windowDays: 90 });
+    assert.ok(stats.length > 30, 'all registered platforms are reported');
+    assert.ok(stats.every(s => s.posts === 0));
+    assert.ok(stats.every(s => s.sessionsPerPost === null));
+  });
+
+  test('stats persist and re-persisting updates rather than duplicating', () => {
+    const stats = computePlatformStats({ db, windowDays: 90, endDate: '2026-11-16' });
+    persistPlatformStats(db, stats);
+    persistPlatformStats(db, stats);
+    const n: any = db.prepare('SELECT COUNT(*) c FROM platform_stats').get();
+    assert.equal(n.c, stats.length, 'upsert must not duplicate');
+  });
+
+  test('the report renders and marks unmeasured values', () => {
+    const stats = computePlatformStats({ db, windowDays: 90 });
+    const text = formatPlatformReport(stats.map(s => recommend(s)));
+    assert.match(text, /PLATFORM/);
+    assert.match(text, /—/, 'unmeasured values shown as a dash');
+  });
+});
+
+describe('content feature extraction', () => {
+  test('strips html and scripts', () => {
+    const out = stripHtml('<p>Hello <b>world</b></p><script>bad()</script>');
+    assert.equal(out, 'Hello world');
+  });
+
+  test('counts words, headings, links and images from html', () => {
+    const f = extractFeatures({
+      html: '<h1>A</h1><h2>B</h2><p>one two three</p><a href="x">l</a><img src="y">',
+      title: 'Top 5 Markets',
+    });
+    assert.equal(f.headingCount, 2);
+    assert.equal(f.linkCount, 1);
+    assert.equal(f.imageCount, 1);
+    assert.ok(f.wordCount >= 5);
+    assert.equal(f.hasNumberInTitle, true);
+  });
+
+  test('handles markdown as well as html', () => {
+    const f = extractFeatures({ text: '# H\n\n## H2\n\n[link](http://a) ![img](http://b)', title: 'No digits' });
+    assert.equal(f.headingCount, 2);
+    assert.equal(f.linkCount, 1);
+    assert.equal(f.imageCount, 1);
+    assert.equal(f.hasNumberInTitle, false);
+  });
+
+  test('empty input does not crash', () => {
+    const f = extractFeatures({});
+    assert.equal(f.wordCount, 0);
+    assert.equal(f.readability, 0);
+  });
+
+  test('simple prose reads easier than dense prose', () => {
+    const easy = fleschReadingEase('The cat sat. The dog ran. It was fun.');
+    const hard = fleschReadingEase('Notwithstanding the aforementioned considerations, the implementation necessitates comprehensive reconfiguration.');
+    assert.ok(easy > hard, `expected ${easy} > ${hard}`);
+  });
+});
+
+describe('correlation', () => {
+  test('perfect positive correlation is 1', () => {
+    const r = pearson([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [2, 4, 6, 8, 10, 12, 14, 16, 18, 20]);
+    assert.ok(Math.abs(r! - 1) < 1e-9);
+  });
+
+  test('perfect negative correlation is -1', () => {
+    const r = pearson([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+    assert.ok(Math.abs(r! + 1) < 1e-9);
+  });
+
+  test('too few points returns null rather than a confident number', () => {
+    assert.equal(pearson([1, 2, 3], [1, 2, 3]), null);
+  });
+
+  test('zero variance returns null instead of dividing by zero', () => {
+    const flat = new Array(20).fill(5);
+    assert.equal(pearson(flat, Array.from({ length: 20 }, (_, i) => i)), null);
+  });
+
+  test('descriptions carry the sample size', () => {
+    assert.match(describeCorrelation(0.62, 40), /strong positive.*n=40/);
+    assert.match(describeCorrelation(null, 4), /not enough data/);
+  });
+});
+
+describe('content stats end to end', () => {
+  test('features persist and outcomes backfill from performance data', () => {
+    const url = 'https://medium.com/p/abc';
+    saveContentStats(db, { url, platform: 'Medium', features: extractFeatures({ text: 'a b c d e', title: 'T' }) });
+
+    db.prepare(`INSERT INTO url_performance (url, source, metric_date, metric_scope, sessions, clicks, collected_at)
+      VALUES (?,?,?,?,?,?,?)`).run(url, 'ga4', new Date().toISOString().slice(0, 10), 'url', 120, 7, nowIso());
+
+    assert.equal(refreshOutcomes(db), 1);
+    const row: any = db.prepare('SELECT sessions_30d, clicks_30d FROM content_stats WHERE url = ?').get(url);
+    assert.equal(row.sessions_30d, 120);
+    assert.equal(row.clicks_30d, 7);
+  });
+
+  test('correlation over a thin table yields nulls, never fake certainty', () => {
+    saveContentStats(db, { url: 'u1', features: extractFeatures({ text: 'a b', title: 'x' }) });
+    const out = correlateFeatures(db, 10);
+    assert.ok(out.every(c => c.r === null), 'n=1 must not produce a correlation');
+  });
+});
