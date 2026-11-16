@@ -54,7 +54,16 @@ export interface Classification {
 export interface PublishedUrlColumn {
   header: string;
   index: number;
+  /** '' when the platform is not in the header but in a sibling cell. */
   platform: string;
+  /**
+   * Index of the column holding the platform NAME for this row, used by the
+   * "slot" layout where the header is generic ("Blog URL 1") and the actual
+   * platform varies per row ("Blog Platform 1" = HackMD, Blogger, ...).
+   */
+  platformColumn?: number;
+  /** Index of the matching "Last Posted ..." column, if one exists. */
+  postedAtColumn?: number;
 }
 
 export interface IngestResult {
@@ -397,6 +406,52 @@ export function findReportUrlColumn(headers: string[]): number | undefined {
   return headerIndex(headers, 'Report URL', 'Target URL', 'targetUrl', 'target_url', 'Report Url');
 }
 
+/**
+ * "Slot" columns: a generic URL header whose platform lives in a sibling cell.
+ *
+ * The New Logic tab — the main blog-posting path, covering 14 platforms through
+ * 3 shared slots — is laid out as:
+ *     Blog Platform 1 | Blog URL 1 | Blog Platform 2 | Blog URL 2 | ...
+ * The header "Blog URL 1" names no platform, so header-based detection skipped
+ * it entirely and almost the whole blog estate was invisible to measurement:
+ * a 9,774-row tab yielded 18 mappings, all from two unrelated columns.
+ *
+ * Pairing is by the trailing slot number, so "Blog URL 2" binds to
+ * "Blog Platform 2" and to "Last Posted Blog Platform 2".
+ */
+export function findSlotUrlColumns(headers: string[]): PublishedUrlColumn[] {
+  const norm = headers.map(h => (h ?? '').trim());
+  const out: PublishedUrlColumn[] = [];
+
+  norm.forEach((header, index) => {
+    const m = header.match(/^(.*?)\s*url\s*(\d+)$/i);
+    if (!m) return;
+    const prefix = m[1].trim();
+    const slot = m[2];
+    if (!prefix) return;
+
+    // Compare on a collapsed, lower-cased form instead of building a regex out
+    // of the prefix — the prefix comes from a spreadsheet header and may hold
+    // any characters at all.
+    const flat = (t: string) => t.toLowerCase().replace(/\s+/g, ' ').trim();
+    const wantPlatform = flat(`${prefix} platform ${slot}`);
+    const wantPosted = flat(`last posted ${prefix} platform ${slot}`);
+
+    const platformColumn = norm.findIndex(h => flat(h) === wantPlatform);
+    if (platformColumn === -1) return;
+
+    const postedAtColumn = norm.findIndex(h => flat(h) === wantPosted);
+
+    out.push({
+      header, index, platform: '',
+      platformColumn,
+      postedAtColumn: postedAtColumn === -1 ? undefined : postedAtColumn,
+    });
+  });
+
+  return out;
+}
+
 export function findPublishedUrlColumns(headers: string[]): PublishedUrlColumn[] {
   const out: PublishedUrlColumn[] = [];
   headers.forEach((raw, index) => {
@@ -404,7 +459,11 @@ export function findPublishedUrlColumns(headers: string[]): PublishedUrlColumn[]
     const platform = platformFromHeader(header);
     if (platform) out.push({ header, index, platform });
   });
-  return out;
+  // Slot columns carry no platform in the header; resolved per row.
+  for (const slot of findSlotUrlColumns(headers)) {
+    if (!out.some(c => c.index === slot.index)) out.push(slot);
+  }
+  return out.sort((a, b) => a.index - b.index);
 }
 
 /** "Last Posted <Platform>" column for a platform, if the sheet has one. */
@@ -558,6 +617,18 @@ export function planRow(
     const value = cell(colInfo.index);
     if (!value.trim() || isStatusText(value)) continue;
 
+    // Slot layout: the platform is in a sibling cell on THIS row, not in the
+    // header. A row whose platform cell is blank tells us nothing about where
+    // the url was published, so it is skipped rather than guessed at.
+    let rowPlatform = colInfo.platform;
+    if (!rowPlatform && colInfo.platformColumn !== undefined) {
+      const named = latestOf(cell(colInfo.platformColumn)).trim();
+      if (!named || isStatusText(named)) continue;
+      rowPlatform = normalizePlatform(named);
+      if (!rowPlatform) continue;
+    }
+    if (!rowPlatform) continue;
+
     const raws = rawUrlsIn(value);
     for (const raw of raws) {
       const published = normalizeUrl(raw);
@@ -568,11 +639,11 @@ export function planRow(
 
       const cls = classifyMapping(reportUrl, raw, {
         fromSheetColumn: true,
-        platform: colInfo.platform,
+        platform: rowPlatform,
       });
       if (cls.confidence < MIN_CONFIDENCE) continue;
 
-      const lastPostedIdx = findLastPostedColumn(headers, colInfo.platform);
+      const lastPostedIdx = colInfo.postedAtColumn ?? findLastPostedColumn(headers, rowPlatform);
       const postedAt = toIsoTimestamp(
         cell(lastPostedIdx) || fallbackDate,
         nowIso(),
@@ -580,7 +651,7 @@ export function planRow(
 
       posts.push({
         reportUrl,
-        platform: colInfo.platform,
+        platform: rowPlatform,
         publishedUrl: published,
         account,
         postedAt,

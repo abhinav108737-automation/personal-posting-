@@ -38,6 +38,7 @@ import {
   openDb, dbPath, closeDb, currentVersion, migrate, nowIso, isoDate, daysAgo,
   type DB,
 } from './db.js';
+import { MAIN_SHEET_ID } from '../config/sheetIds.js';
 import { LATEST_VERSION } from './schema.js';
 import { FLAGS, enabled, mayMutateExternally } from './flags.js';
 import {
@@ -559,8 +560,29 @@ async function cmdIngest(args: ParsedArgs, out: Out): Promise<number> {
       '',
     ]));
 
+    // --live reads the REAL tabs through the read-only exception
+    // (config/readOnlySheets.ts). That client is created with Google's
+    // spreadsheets.readonly scope, so Google itself rejects any write with 403
+    // — verified. Without --live the tab lock applies and reads land on the
+    // empty test tab, which is the safe default.
+    const live = flagBool(args, 'live');
+    let readOnly: any = null;
+    if (live) {
+      const { createReadOnlySheets, readOnlyAvailable } = await import('../config/readOnlySheets.js');
+      if (!readOnlyAvailable()) {
+        out.error('  --live needs a Google service account; none found. Run "intel status".');
+        return 1;
+      }
+      out.log('  READ-ONLY LIVE MODE — reading the real tabs. This client cannot write (403 by scope).');
+      out.log('');
+      readOnly = await createReadOnlySheets({ log: () => {} });
+    }
+
     for (const tab of tabs) {
-      const r = await ingestFromSheet({ db: h.db, tab, limit, force });
+      const readRows = readOnly
+        ? async () => await readOnly.getValues(MAIN_SHEET_ID, `'${tab.replace(/'/g, "''")}'!A:BZ`)
+        : undefined;
+      const r = await ingestFromSheet({ db: h.db, tab, limit, force, readRows });
       if (r.reason && r.rowsRead === 0) {
         out.log(`  SKIP  ${tab} — ${r.reason}`);
         continue;
@@ -970,6 +992,35 @@ export function formatCalibrationHistory(db: DB, limit = 5): string {
     .join('\n');
 }
 
+
+async function cmdExport(args: ParsedArgs, out: Out): Promise<number> {
+  const h = openHandle(args);
+  try {
+    const { exportToSheet, formatExportResult, EXPORT_TABS } = await import('./sheetExport.js');
+    const dryRun = flagBool(args, 'dry-run');
+
+    out.log(banner('EXPORT — write a dated snapshot into the spreadsheet', [
+      'Results are appended to Test_ tabs so they can be tracked from the sheet:',
+      ...Object.values(EXPORT_TABS).map(t => `  ${t}`),
+      '',
+      'Snapshots APPEND rather than overwrite, so repeated exports show the',
+      'difference over time. The tab lock permits these tabs because they are',
+      'Test_-prefixed; the live tabs cannot be written by this or anything else.',
+      '',
+    ]));
+
+    const result = await exportToSheet({ db: h.db, dryRun, log: m => out.log(m) });
+    out.log('');
+    out.log(formatExportResult(result));
+    return 0;
+  } catch (err: any) {
+    out.error(`Export failed: ${err?.message ?? err}`);
+    return 1;
+  } finally {
+    release(h);
+  }
+}
+
 async function cmdReport(args: ParsedArgs, out: Out, env: NodeJS.ProcessEnv): Promise<number> {
   await cmdStatus(args, out, env);
   out.log('');
@@ -991,7 +1042,8 @@ export const COMMANDS = [
   ['status', 'Flags, database, schema version, row counts, and MISSING credentials'],
   ['migrate', 'Apply pending database migrations'],
   ['collect', 'Run the collectors that have credentials; say why the others were skipped'],
-  ['ingest', 'Read the distribution sheet into published_posts / url_mapping'],
+  ['ingest', 'Read the distribution sheet (--live reads the REAL tabs read-only)'],
+  ['export', 'Append a dated snapshot into the Test_ tracking tabs in the sheet'],
   ['index-check', 'Check whether recent published posts are visible in search'],
   ['score', 'Score report URLs and explain every score'],
   ['platforms', 'Which of the platforms actually work'],
@@ -1066,6 +1118,7 @@ export async function runCli(argv: string[], options: RunOptions = {}): Promise<
       case 'reject': return decide(args, out, 'rejected');
       case 'apply': return await cmdApply(args, out);
       case 'calibrate': return await cmdCalibrate(args, out);
+      case 'export': return await cmdExport(args, out);
       case 'report': return await cmdReport(args, out, env);
       case 'help': out.log(formatHelp()); return 0;
       default:

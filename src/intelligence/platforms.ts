@@ -92,6 +92,17 @@ export const PLATFORMS: PlatformInfo[] = [
   { key: 'fourshared', name: 'FourShared', utmSource: '4shared', postMethod: 'browser', editCapability: 'none' },
   { key: 'pdfhost', name: 'PdfHost', utmSource: 'pdfhost', postMethod: 'browser', editCapability: 'none' },
   { key: 'scribd', name: 'Scribd', utmSource: 'scribd', postMethod: 'browser', editCapability: 'none' },
+
+  // Found in the live sheet during ingest (2026-11-16) but absent from
+  // src/browser/ and from UTM_PARAMS. They are really being posted to, so they
+  // are registered here or they stay invisible to every platform report.
+  // utmSource is a best guess until confirmed against GA4 — if these links
+  // carry no utm_source at all, their traffic cannot be attributed and that is
+  // itself worth knowing.
+  { key: 'archiveorg', name: 'ArchiveOrg', utmSource: 'archiveorg', postMethod: 'browser', editCapability: 'unknown', domain: 'archive.org',
+    notes: 'Seen in the sheet; no agent directory in src/browser/. Posting route unconfirmed.' },
+  { key: 'mediafire', name: 'MediaFire', utmSource: 'mediafire', postMethod: 'browser', editCapability: 'none', domain: 'mediafire.com',
+    notes: 'Seen in the sheet; file host, no editable body text.' },
 ];
 
 const BY_KEY = new Map(PLATFORMS.map(p => [p.key.toLowerCase(), p]));
