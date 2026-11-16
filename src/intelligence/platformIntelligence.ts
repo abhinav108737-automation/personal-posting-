@@ -19,7 +19,7 @@
 import type { DB } from './db.js';
 import { nowIso, daysAgo, isoDate } from './db.js';
 import { DEFAULT_THRESHOLDS, type Thresholds } from './weights.js';
-import { PLATFORMS, platformByName } from './platforms.js';
+import { PLATFORMS, platformByName, type PlatformInfo } from './platforms.js';
 import { enabled } from './flags.js';
 import { normaliseUrl } from './indexation.js';
 
@@ -66,6 +66,15 @@ export interface ComputeOptions {
  * Counting an unknown as "not indexed" would make a flaky SERP provider look
  * like a failing platform.
  */
+/**
+ * Every spelling of a platform that might appear in published_posts.platform.
+ * The sheet, the posting agents and the UTM table do not agree on one form, so
+ * matching on a single field silently loses whole platforms.
+ */
+export function platformAliases(p: PlatformInfo): string[] {
+  return [...new Set([p.key, p.name, p.utmSource].map(v => String(v).toLowerCase()))];
+}
+
 export function indexationRate(indexed: number, notIndexed: number): number | null {
   const known = indexed + notIndexed;
   return known === 0 ? null : indexed / known;
@@ -80,10 +89,17 @@ export function computePlatformStats(opts: ComputeOptions): PlatformWindowStats[
   const out: PlatformWindowStats[] = [];
 
   for (const p of PLATFORMS) {
+    // Match key, display name AND utmSource. The ingest normalises a sheet
+    // value like "Google Sites" to "googlesites", which is the utmSource form
+    // and matches neither the key ("googlesite") nor the name ("GoogleSite").
+    // Without this, 44 Google Sites posts and 17 4shared posts read as zero and
+    // both platforms reported "insufficient-data" while being actively used.
+    const aliases = platformAliases(p);
     const posts = db.prepare(
       `SELECT COUNT(*) AS c FROM published_posts
-        WHERE LOWER(platform) IN (?, ?) AND posted_at >= ? AND posted_at <= ?`
-    ).get(p.key.toLowerCase(), p.name.toLowerCase(), windowStart, `${windowEnd}T23:59:59Z`) as any;
+        WHERE LOWER(platform) IN (${aliases.map(() => '?').join(',')})
+          AND posted_at >= ? AND posted_at <= ?`
+    ).get(...aliases, windowStart, `${windowEnd}T23:59:59Z`) as any;
 
     // indexation_checks stores the NORMALISED url (scheme/www/utm/trailing
     // slash stripped) while published_posts stores the raw url from the sheet.
@@ -92,8 +108,9 @@ export function computePlatformStats(opts: ComputeOptions): PlatformWindowStats[
     // checks up by key instead.
     const postUrls = (db.prepare(
       `SELECT published_url FROM published_posts
-        WHERE LOWER(platform) IN (?, ?) AND posted_at >= ? AND published_url IS NOT NULL`
-    ).all(p.key.toLowerCase(), p.name.toLowerCase(), windowStart) as any[])
+        WHERE LOWER(platform) IN (${aliases.map(() => '?').join(',')})
+          AND posted_at >= ? AND published_url IS NOT NULL`
+    ).all(...aliases, windowStart) as any[])
       .map(r => normaliseUrl(String(r.published_url)))
       .filter(Boolean);
 
