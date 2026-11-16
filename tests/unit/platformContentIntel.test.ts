@@ -16,6 +16,7 @@ import {
   describeCorrelation, saveContentStats, correlateFeatures, refreshOutcomes,
 } from '../../src/intelligence/contentIntelligence.js';
 import { DEFAULT_THRESHOLDS } from '../../src/intelligence/weights.js';
+import { normaliseUrl } from '../../src/intelligence/indexation.js';
 
 let dir: string, db: any;
 beforeEach(() => {
@@ -29,8 +30,10 @@ function addPost(platform: string, url: string, postedAt = '2026-11-01T00:00:00Z
     VALUES (?,?,?,?,?)`).run('https://kenresearch.com/r', platform, url, postedAt, nowIso());
 }
 function addIndexation(url: string, status: string) {
+  // indexation.ts stores the NORMALISED url — tests must store it the same way
+  // or they would pass against a join that cannot work in production.
   db.prepare(`INSERT INTO indexation_checks (url, checked_at, status, confidence)
-    VALUES (?,?,?,?)`).run(url, nowIso(), status, 0.8);
+    VALUES (?,?,?,?)`).run(normaliseUrl(url), nowIso(), status, 0.8);
 }
 
 describe('indexation rate excludes unknowns', () => {
@@ -254,5 +257,32 @@ describe('GA4 attribution convention (regression)', () => {
     assert.equal(stats.find(s => s.platform === 'LinkedIn')!.sessions, 0,
       'linkedin must not absorb linkedin-pulse traffic');
     assert.equal(stats.find(s => s.platform === 'LinkedinPulse')!.sessions, 99);
+  });
+});
+
+describe('URL normalisation across modules (regression)', () => {
+  test('indexation recorded on a messy url is still found from the raw post url', () => {
+    // published_posts keeps the raw url from the sheet, complete with utm and
+    // www; indexation_checks keeps the normalised form. The reader must bridge
+    // that gap, or indexation silently reads as zero for every platform.
+    const raw = 'https://www.hackmd.io/abc123/?utm_source=hackmd&utm_medium=referral';
+    addPost('HackMD', raw);
+    addIndexation(raw, 'indexed');
+
+    const stats = computePlatformStats({ db, windowDays: 365, endDate: '2026-11-16' });
+    const hackmd = stats.find(s => s.platform === 'HackMD')!;
+    assert.equal(hackmd.postsIndexed, 1, 'raw vs normalised url must still match');
+    assert.equal(hackmd.indexationRate, 1);
+  });
+
+  test('scoring finds indexation for a report url stored normalised', async () => {
+    const { gatherSignals } = await import('../../src/intelligence/scoring.js');
+    const reportUrl = 'https://www.kenresearch.com/report-x/?utm_source=x';
+    db.prepare(`INSERT INTO indexation_checks (url, checked_at, status, confidence)
+      VALUES (?,?,?,?)`).run(normaliseUrl(reportUrl), nowIso(), 'indexed', 0.9);
+
+    const s = gatherSignals({ db, reportUrl });
+    assert.notEqual(s.indexation, null, 'indexation must be found despite url form');
+    assert.ok((s.indexation as number) > 0.9);
   });
 });

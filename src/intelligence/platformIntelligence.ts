@@ -21,6 +21,7 @@ import { nowIso, daysAgo, isoDate } from './db.js';
 import { DEFAULT_THRESHOLDS, type Thresholds } from './weights.js';
 import { PLATFORMS, platformByName } from './platforms.js';
 import { enabled } from './flags.js';
+import { normaliseUrl } from './indexation.js';
 
 export interface PlatformWindowStats {
   platform: string;
@@ -84,15 +85,32 @@ export function computePlatformStats(opts: ComputeOptions): PlatformWindowStats[
         WHERE LOWER(platform) IN (?, ?) AND posted_at >= ? AND posted_at <= ?`
     ).get(p.key.toLowerCase(), p.name.toLowerCase(), windowStart, `${windowEnd}T23:59:59Z`) as any;
 
-    const idx = db.prepare(
-      `SELECT
-         SUM(CASE WHEN i.status = 'indexed'     THEN 1 ELSE 0 END) AS indexed,
-         SUM(CASE WHEN i.status = 'not_indexed' THEN 1 ELSE 0 END) AS notIndexed,
-         SUM(CASE WHEN i.status = 'unknown'     THEN 1 ELSE 0 END) AS unknown
-       FROM indexation_checks i
-       JOIN published_posts pp ON pp.published_url = i.url
-      WHERE LOWER(pp.platform) IN (?, ?) AND pp.posted_at >= ?`
-    ).get(p.key.toLowerCase(), p.name.toLowerCase(), windowStart) as any;
+    // indexation_checks stores the NORMALISED url (scheme/www/utm/trailing
+    // slash stripped) while published_posts stores the raw url from the sheet.
+    // A SQL join on equality therefore matches nothing — it silently reported
+    // zero indexation for every platform forever. Normalise in JS and look the
+    // checks up by key instead.
+    const postUrls = (db.prepare(
+      `SELECT published_url FROM published_posts
+        WHERE LOWER(platform) IN (?, ?) AND posted_at >= ? AND published_url IS NOT NULL`
+    ).all(p.key.toLowerCase(), p.name.toLowerCase(), windowStart) as any[])
+      .map(r => normaliseUrl(String(r.published_url)))
+      .filter(Boolean);
+
+    const idx = { indexed: 0, notIndexed: 0, unknown: 0 };
+    if (postUrls.length) {
+      const latest = db.prepare(
+        `SELECT status FROM indexation_checks
+          WHERE url = ? ORDER BY checked_at DESC LIMIT 1`
+      );
+      for (const u of postUrls) {
+        const row = latest.get(u) as any;
+        if (!row) continue;
+        if (row.status === 'indexed') idx.indexed++;
+        else if (row.status === 'not_indexed') idx.notIndexed++;
+        else idx.unknown++;
+      }
+    }
 
     // GA4 attributes traffic by utm_source, which the posting code already sets
     // on every outbound link (see src/utils/utm.ts).

@@ -37,6 +37,7 @@ import {
   reportForPost,
   mappingCoverage,
   MIN_CONFIDENCE,
+  DEFAULT_TAB,
 } from '../../src/intelligence/urlMapping.js';
 
 // ── fixtures ────────────────────────────────────────────────────────────────
@@ -379,8 +380,25 @@ describe('platformFromHeader', () => {
     assert.equal(platformFromHeader('FB Post URL'), 'facebook');
     assert.equal(platformFromHeader('Linkedin Pulse URL'), 'linkedin-pulse');
   });
+  test('recognises the bare "<Platform> URL" columns the sheet also writes', () => {
+    // src/sheets/sheets.ts writes these headers without the word "Post".
+    // They are real published-URL columns; missing them means those platforms
+    // can never be measured.
+    assert.equal(platformFromHeader('Instapaper URL'), 'instapaper');
+    assert.equal(platformFromHeader('Raindrop URL'), 'raindrop');
+    assert.equal(platformFromHeader('Pearltrees URL'), 'pearltrees');
+    assert.equal(platformFromHeader('PdfHost URL'), 'pdfhost');
+    assert.equal(platformFromHeader('4shared URL'), '4shared');
+    assert.equal(platformFromHeader('Scribd URL'), 'scribd');
+    assert.equal(platformFromHeader('Mastodon URL'), 'mastodon');
+  });
   test('refuses input and asset columns', () => {
-    for (const bad of ['Target URL', 'Report URL', 'Download Report URL', 'Cover Image URL', 'Title', '', 'Batch']) {
+    for (const bad of [
+      'Target URL', 'Report URL', 'Download Report URL', 'Cover Image URL',
+      'Images URL', 'Title', '', 'Batch', 'URL',
+      // A platform name in a column that is not where we published.
+      'LinkedIn Profile URL', 'Medium Author URL',
+    ]) {
       assert.equal(platformFromHeader(bad), '', bad);
     }
   });
@@ -552,13 +570,48 @@ const SHEET_FIXTURE: string[][] = [
 
 describe('ingestFromSheet', () => {
   test('is a no-op when the intelligence flag is off', async () => {
+    // Explicit rather than ambient: the test must prove the gate, not inherit
+    // whatever FEATURE_INTELLIGENCE happens to be in the shell.
+    const prev = process.env.FEATURE_INTELLIGENCE;
+    delete process.env.FEATURE_INTELLIGENCE;
+    try {
+      const db = tmpDb();
+      const res = await ingestFromSheet({ db, tab: 'Blogs', readRows: async () => SHEET_FIXTURE });
+      assert.equal(res.ok, true);
+      assert.equal(res.postsUpserted, 0);
+      assert.equal(res.runId, null);
+      assert.match(res.reason ?? '', /disabled/);
+      assert.equal((db.prepare('SELECT COUNT(*) AS n FROM published_posts').get() as any).n, 0);
+    } finally {
+      if (prev === undefined) delete process.env.FEATURE_INTELLIGENCE;
+      else process.env.FEATURE_INTELLIGENCE = prev;
+    }
+  });
+
+  test('runs without force once the flag is explicitly on', async () => {
+    const prev = process.env.FEATURE_INTELLIGENCE;
+    process.env.FEATURE_INTELLIGENCE = '1';
+    try {
+      const db = tmpDb();
+      const res = await ingestFromSheet({ db, tab: 'Blogs', readRows: async () => SHEET_FIXTURE });
+      assert.equal(res.ok, true);
+      assert.equal(res.postsUpserted, 3);
+    } finally {
+      if (prev === undefined) delete process.env.FEATURE_INTELLIGENCE;
+      else process.env.FEATURE_INTELLIGENCE = prev;
+    }
+  });
+
+  test('an omitted tab falls back to the default, never "undefined!A:BZ"', async () => {
+    // runCycle.ts calls ingestFromSheet({ db, limit }) with no tab.
     const db = tmpDb();
-    const res = await ingestFromSheet({ db, tab: 'Blogs', readRows: async () => SHEET_FIXTURE });
+    const res = await ingestFromSheet({ db, force: true, readRows: async () => SHEET_FIXTURE });
     assert.equal(res.ok, true);
-    assert.equal(res.postsUpserted, 0);
-    assert.equal(res.runId, null);
-    assert.match(res.reason ?? '', /disabled/);
-    assert.equal((db.prepare('SELECT COUNT(*) AS n FROM published_posts').get() as any).n, 0);
+    assert.equal(res.postsUpserted, 3);
+    const run = db.prepare('SELECT collector FROM collection_runs ORDER BY id DESC LIMIT 1').get() as any;
+    assert.equal(run.collector, `urlMapping:${DEFAULT_TAB}`);
+    assert.match(run.collector, /^urlMapping:\S/);
+    assert.doesNotMatch(run.collector, /undefined/);
   });
 
   test('ingests posts and mappings from a fixture sheet', async () => {

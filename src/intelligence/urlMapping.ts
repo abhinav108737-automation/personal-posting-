@@ -39,6 +39,7 @@ import { nowIso, startRun, finishRun } from './db.js';
 import { enabled } from './flags.js';
 import { MAIN_SHEET_ID, maskId } from '../config/sheetIds.js';
 import { guardSheetsClient } from '../config/tabGuard.js';
+import { platformByName } from './platforms.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -366,7 +367,19 @@ function isPublishedUrlHeader(header: string): boolean {
   // "Download Report URL", "Cover Image URL", "Target URL", "Report URL 2" are
   // inputs or assets, never somewhere we published.
   if (/download|image|target|^report url|^url$/.test(h)) return false;
-  return /post\s*url$/.test(h) || /pulse\s*url$/.test(h);
+  if (/post\s*url$/.test(h) || /pulse\s*url$/.test(h)) return true;
+
+  // Not every column follows "<Platform> Post URL". src/sheets/sheets.ts also
+  // writes bare "<Platform> URL" headers — Instapaper URL, Raindrop URL,
+  // Pearltrees URL, PdfHost URL, 4shared URL, Scribd URL, Mastodon URL. Those
+  // are real published-URL columns and were previously invisible to the
+  // mapper, so those platforms could never be measured.
+  //
+  // The whole remainder must be a platform the registry knows, which is what
+  // keeps "LinkedIn Profile URL" or "Images URL" out.
+  const stripped = h.replace(/\s*url\s*$/i, '').trim();
+  if (!stripped) return false;
+  return Boolean(platformByName(normalizePlatform(stripped)));
 }
 
 // ── Header mapping (by NAME, never by index) ─────────────────────────────────
@@ -626,10 +639,18 @@ async function readTabRows(tab: string, client?: any): Promise<string[][]> {
 
 // ── The collector ────────────────────────────────────────────────────────────
 
+/** The main sheet's default tab, matching SOCIAL_SHEET_NAME in sheets.ts. */
+export const DEFAULT_TAB = 'Social Media';
+
 export interface IngestOptions {
   db: DB;
-  /** Sheet tab to read, e.g. 'Social Media' or 'Blogs'. */
-  tab: string;
+  /**
+   * Sheet tab to read, e.g. 'Social Media' or 'Blogs'. Optional: a caller that
+   * omits it gets DEFAULT_TAB, which is the same tab the rest of the codebase
+   * treats as the main sheet's default (SOCIAL_SHEET_NAME in sheets.ts). A
+   * blank tab would otherwise become the range "undefined!A:BZ".
+   */
+  tab?: string;
   /** Maximum data rows to process. */
   limit?: number;
   /** Injected for tests — bypasses all network access. */
@@ -653,7 +674,8 @@ export interface IngestOptions {
  * Idempotent: running twice over the same rows updates in place.
  */
 export async function ingestFromSheet(opts: IngestOptions): Promise<IngestResult> {
-  const { db, tab } = opts;
+  const { db } = opts;
+  const tab = (opts.tab ?? '').trim() || DEFAULT_TAB;
   const limit = opts.limit ?? Infinity;
 
   const base: IngestResult = {

@@ -24,6 +24,7 @@ import {
   DEFAULT_THRESHOLDS, type ScoreWeights, type Thresholds,
 } from './weights.js';
 import { FLAGS, enabled } from './flags.js';
+import { normaliseUrl } from './indexation.js';
 
 /** A signal is a number in 0..1, or null meaning "not known". */
 export type Signal = number | null;
@@ -212,10 +213,12 @@ export function gatherSignals(opts: GatherOptions): SignalSet {
     `SELECT COUNT(*) AS leads FROM leads WHERE report_url = ? AND created_at >= ?`
   ).get(reportUrl, since) as any;
 
+  // indexation_checks is keyed by the NORMALISED url; reportUrl is raw.
+  // Looking it up raw silently never matched, so indexation was always missing.
   const idx = db.prepare(
     `SELECT status, confidence FROM indexation_checks
       WHERE url = ? ORDER BY checked_at DESC LIMIT 1`
-  ).get(reportUrl) as any;
+  ).get(normaliseUrl(reportUrl)) as any;
 
   const lastPost = db.prepare(
     `SELECT MAX(posted_at) AS last FROM published_posts WHERE report_url = ?`
