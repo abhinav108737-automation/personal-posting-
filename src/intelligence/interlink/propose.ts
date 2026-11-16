@@ -31,8 +31,31 @@ import {
   loadInterlinkLimits, sanitiseInterlinkLimits, DEFAULT_THRESHOLDS,
   type InterlinkLimits, type Thresholds,
 } from '../weights.js';
-import { canApplyInterlinks } from '../platforms.js';
+import { canApplyInterlinks, platformByName } from '../platforms.js';
 import { slugOf } from '../urlMapping.js';
+
+/**
+ * Tag a destination URL with the UTM of the page the link will live ON
+ * (the source post's platform), matching how every other outbound
+ * kenresearch.com link on that platform is already tagged — see
+ * src/utils/utm.ts. Without this, a click through a newly-inserted
+ * interlink is indistinguishable in GA4 from direct/unknown traffic.
+ *
+ * Idempotent: strips any existing utm_* params first, so re-tagging (or a
+ * destination that already carried one) never produces duplicates.
+ */
+export function tagDestinationUrl(url: string, sourcePlatform: string): string {
+  const platform = platformByName(sourcePlatform);
+  if (!platform) return url; // unknown platform: leave untouched rather than guess
+  let [base, hash = ''] = url.split('#');
+  hash = hash ? `#${hash}` : '';
+  const [path, query = ''] = base.split('?');
+  const kept = query
+    .split('&')
+    .filter((p) => p.length > 0 && !p.toLowerCase().startsWith('utm_'));
+  kept.push(`utm_source=${platform.utmSource}`, 'utm_medium=referral', 'utm_campaign=automation');
+  return `${path}?${kept.join('&')}${hash}`;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 3. TOPIC RELEVANCE
@@ -664,12 +687,23 @@ export function activeProposalsForSource(db: DB, sourceUrl: string): number {
   return Number(r?.n ?? 0);
 }
 
+/**
+ * Counts proposals since `sinceIso` targeting the SAME destination, by
+ * linkKey (protocol/www/query/fragment-insensitive) rather than an exact
+ * string match. destination_url is stored UTM-tagged per the source
+ * platform (tagDestinationUrl), so two proposals to the same report from
+ * different source platforms — or the same platform re-run after a query
+ * string changed — store different exact strings but must still count
+ * against the same weekly cap.
+ */
 export function proposalsForDestinationSince(db: DB, destinationUrl: string, sinceIso: string): number {
-  const r = db.prepare(`
-    SELECT COUNT(*) AS n FROM interlink_proposals
-     WHERE destination_url = ? AND status <> 'rejected' AND created_at >= ?
-  `).get(destinationUrl, sinceIso) as any;
-  return Number(r?.n ?? 0);
+  const key = linkKey(destinationUrl);
+  if (!key) return 0;
+  const rows = db.prepare(`
+    SELECT destination_url FROM interlink_proposals
+     WHERE status <> 'rejected' AND created_at >= ?
+  `).all(sinceIso) as Array<{ destination_url: string }>;
+  return rows.filter(r => linkKey(r.destination_url) === key).length;
 }
 
 /**
@@ -843,10 +877,17 @@ export async function generateProposals(opts: GenerateOptions): Promise<Generate
         `anchor ${anchor.strategy} · destination ${dest.indexation}` +
         (dest.position === null ? '' : ` · avg position ${dest.position.toFixed(1)}`);
 
+      // Tagged with the SOURCE page's platform UTM — the click is attributed
+      // to the page the link lives on, matching every other outbound link
+      // that platform's posts carry. Duplicate/self-link checks above
+      // deliberately used the untagged dest.url, so a query-string difference
+      // never masks a real duplicate.
+      const taggedDestinationUrl = tagDestinationUrl(dest.url, source.platform);
+
       const id = insertProposal(db, {
         sourceUrl: source.sourceUrl,
         sourcePlatform: source.platform,
-        destinationUrl: dest.url,
+        destinationUrl: taggedDestinationUrl,
         anchorText: anchor.anchor,
         paragraph: pick.paragraph,
         relevance: pick.score,
@@ -860,7 +901,7 @@ export async function generateProposals(opts: GenerateOptions): Promise<Generate
         id,
         sourceUrl: source.sourceUrl,
         sourcePlatform: source.platform,
-        destinationUrl: dest.url,
+        destinationUrl: taggedDestinationUrl,
         anchorText: anchor.anchor,
         anchorStrategy: anchor.strategy,
         relevance: pick.score,

@@ -22,7 +22,7 @@ import {
   selectSources, selectDestinations, destinationGap, normaliseIndexation,
   paragraphHash, insertProposal, activeProposalsForSource,
   proposalsForDestinationSince, lastEditOfSource,
-  generateProposals, formatProposalRun,
+  generateProposals, formatProposalRun, tagDestinationUrl,
   type SourceCandidate,
 } from '../../src/intelligence/interlink/propose.js';
 
@@ -725,7 +725,9 @@ describe('generateProposals', () => {
     assert.equal(res.created, 1);
     const p = res.proposals[0];
     assert.equal(p.sourceUrl, SRC_URL);
-    assert.equal(p.destinationUrl, DEST_URL);
+    // Tagged with the hackmd source's UTM — see tagDestinationUrl's own tests
+    // for the tagging logic itself; this just checks generateProposals wires it in.
+    assert.equal(p.destinationUrl, tagDestinationUrl(DEST_URL, 'hackmd'));
     assert.ok(p.relevance >= DEFAULT_INTERLINK_LIMITS.minRelevanceToPropose);
     assert.ok(!isBannedAnchor(p.anchorText));
 
@@ -1128,5 +1130,40 @@ describe('adversarial regressions', () => {
     for (const [k, v] of Object.entries(res.limits)) {
       assert.ok(Number.isFinite(v), `limit ${k} survived as ${v}`);
     }
+  });
+});
+
+describe('tagDestinationUrl', () => {
+  test('tags a bare kenresearch.com URL with the source platform UTM', () => {
+    const out = tagDestinationUrl('https://www.kenresearch.com/industry-reports/r-1', 'HackMD');
+    assert.equal(out, 'https://www.kenresearch.com/industry-reports/r-1?utm_source=hackmd&utm_medium=referral&utm_campaign=automation');
+  });
+
+  test('is idempotent: re-tagging an already-tagged URL does not duplicate params', () => {
+    const once = tagDestinationUrl('https://www.kenresearch.com/industry-reports/r-1', 'Mataroa');
+    const twice = tagDestinationUrl(once, 'Mataroa');
+    assert.equal(once, twice);
+  });
+
+  test('strips a DIFFERENT existing utm_source rather than appending a second one', () => {
+    const out = tagDestinationUrl(
+      'https://www.kenresearch.com/industry-reports/r-1?utm_source=wrong&utm_medium=x',
+      'hackmd',
+    );
+    const params = new URL(out).searchParams;
+    assert.equal(params.get('utm_source'), 'hackmd');
+    assert.equal(params.get('utm_medium'), 'referral');
+    assert.equal(params.get('utm_campaign'), 'automation');
+    assert.equal([...params.keys()].filter(k => k === 'utm_source').length, 1);
+  });
+
+  test('preserves a non-UTM query param and the fragment', () => {
+    const out = tagDestinationUrl('https://www.kenresearch.com/industry-reports/r-1?ref=foo#section', 'hackmd');
+    assert.equal(out, 'https://www.kenresearch.com/industry-reports/r-1?ref=foo&utm_source=hackmd&utm_medium=referral&utm_campaign=automation#section');
+  });
+
+  test('leaves the URL untouched for an unrecognised platform rather than guessing', () => {
+    const url = 'https://www.kenresearch.com/industry-reports/r-1';
+    assert.equal(tagDestinationUrl(url, 'totally-unknown-platform'), url);
   });
 });

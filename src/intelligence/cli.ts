@@ -54,6 +54,7 @@ import { ingestFromSheet, mappingCoverage } from './urlMapping.js';
 import { collectGsc } from './collectors/gsc.js';
 import { collectGa4 } from './collectors/ga4.js';
 import { collectPipedrive } from './collectors/pipedrive.js';
+import { importManualExportFile, type ManualImportSource } from './collectors/manualImport.js';
 import { maskId, describeSheetConfig, KEN_ENV } from '../config/sheetIds.js';
 
 // ── Output seam ──────────────────────────────────────────────────────────────
@@ -92,6 +93,7 @@ export interface ParsedArgs {
 /** Flags that consume the following token when not written as --name=value. */
 export const VALUE_FLAGS = new Set([
   'db', 'days', 'limit', 'tab', 'by', 'start', 'end', 'platform', 'site', 'reason',
+  'file', 'source', 'date', 'domain',
 ]);
 
 /**
@@ -548,10 +550,71 @@ async function cmdCollect(args: ParsedArgs, out: Out, env: NodeJS.ProcessEnv): P
   }
 }
 
+/**
+ * import-performance — read a GA4 or Search Console CSV export the operator
+ * downloaded themselves (no API credentials, no service-account access
+ * granted to anyone). Writes into the SAME url_performance table the live
+ * ga4/gsc collectors would write to, so scoring/platform/interlink code
+ * cannot tell the difference.
+ */
+async function cmdImportPerformance(args: ParsedArgs, out: Out): Promise<number> {
+  const h = openHandle(args);
+  try {
+    out.log(banner('IMPORT-PERFORMANCE — load a GA4/GSC export file', [
+      'Reads a CSV you exported yourself from the GA4 or Search Console UI.',
+      'No credentials are read or required. Writes to the local database only.',
+      '',
+    ]));
+
+    const file = flagStr(args, 'file');
+    const sourceFlag = flagStr(args, 'source');
+    const date = flagStr(args, 'date');
+
+    if (!file || !sourceFlag || !date) {
+      out.log('Usage: intel import-performance --file <path.csv> --source ga4|gsc --date YYYY-MM-DD [--domain https://www.kenresearch.com]');
+      out.log('');
+      out.log('  --file    Path to the CSV you exported from the GA4 or Search Console UI.');
+      out.log('  --source  "ga4" or "gsc" — which report this export came from.');
+      out.log('  --date    YYYY-MM-DD. GA4/GSC exports carry one aggregate number per URL');
+      out.log('            for whichever date range you picked on screen, not a date per');
+      out.log('            row — give the date the export represents (e.g. the day you ran it,');
+      out.log('            or the last day of the range). Re-running with the SAME date');
+      out.log('            updates that row instead of duplicating it.');
+      return 1;
+    }
+    if (sourceFlag !== 'ga4' && sourceFlag !== 'gsc') {
+      out.log(`--source must be "ga4" or "gsc", got ${JSON.stringify(sourceFlag)}.`);
+      return 1;
+    }
+    if (!fs.existsSync(file)) {
+      out.log(`File not found: ${file}`);
+      return 1;
+    }
+
+    const source: ManualImportSource = sourceFlag === 'ga4' ? 'ga4-manual' : 'gsc-manual';
+    const domain = flagStr(args, 'domain');
+    const result = importManualExportFile(h.db, file, { source, metricDate: date, ...(domain ? { domain } : {}) });
+
+    out.log(`Matched columns: ${JSON.stringify(result.matchedColumns)}`);
+    out.log(`Parsed ${result.rowsParsed} row(s), skipped ${result.rowsSkipped}, wrote ${result.rowsWritten}.`);
+    if (result.skippedReasons.length) {
+      out.log('');
+      out.log('Skipped rows / notes:');
+      for (const reason of result.skippedReasons.slice(0, 20)) out.log(`  - ${reason}`);
+      if (result.skippedReasons.length > 20) out.log(`  ... and ${result.skippedReasons.length - 20} more`);
+    }
+    return result.rowsWritten > 0 || result.rowsParsed === 0 ? 0 : 1;
+  } finally {
+    release(h);
+  }
+}
+
 async function cmdIngest(args: ParsedArgs, out: Out): Promise<number> {
   const h = openHandle(args);
   try {
-    const tabs = (flagStr(args, 'tab') ?? 'Social Media,Blogs').split(',').map(t => t.trim()).filter(Boolean);
+    // 'Blogs' was Pranav's old name for this tab; it was renamed to 'New
+    // Logic' and no longer exists under the old name (confirmed 2026-11-16).
+    const tabs = (flagStr(args, 'tab') ?? 'Social Media,New Logic').split(',').map(t => t.trim()).filter(Boolean);
     const limit = flagLimit(args, Infinity);
     const force = flagBool(args, 'force');
 
@@ -1042,6 +1105,7 @@ export const COMMANDS = [
   ['status', 'Flags, database, schema version, row counts, and MISSING credentials'],
   ['migrate', 'Apply pending database migrations'],
   ['collect', 'Run the collectors that have credentials; say why the others were skipped'],
+  ['import-performance', 'Load a GA4/GSC CSV export you downloaded yourself — no credentials needed'],
   ['ingest', 'Read the distribution sheet (--live reads the REAL tabs read-only)'],
   ['export', 'Append a dated snapshot into the Test_ tracking tabs in the sheet'],
   ['index-check', 'Check whether recent published posts are visible in search'],
@@ -1106,6 +1170,7 @@ export async function runCli(argv: string[], options: RunOptions = {}): Promise<
       case 'status': return await cmdStatus(args, out, env);
       case 'migrate': return await cmdMigrate(args, out);
       case 'collect': return await cmdCollect(args, out, env);
+      case 'import-performance': return await cmdImportPerformance(args, out);
       case 'ingest': return await cmdIngest(args, out);
       case 'index-check':
       case 'index': return await cmdIndexCheck(args, out);
