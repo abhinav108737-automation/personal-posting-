@@ -18,7 +18,7 @@
  * differs.
  */
 
-import { DEV_SHEET_TAB, TAB_LOCK_ACTIVE } from './sheetIds.js';
+import { DEV_SHEET_TAB, TAB_LOCK_ACTIVE, DEV_TAB_PREFIX, isDevTab } from './sheetIds.js';
 
 /** Thrown when a development run attempts to touch anything but the dev tab. */
 export class TabGuardViolation extends Error {
@@ -54,8 +54,18 @@ export function splitRange(range: string): { tab: string | null; cells: string }
  * whichever tab happens to be first in the spreadsheet, which in production is
  * live data. It is given the dev tab explicitly.
  */
-export function rewriteRange(range: string, devTab: string = DEV_SHEET_TAB): string {
-  const { cells } = splitRange(range);
+export function rewriteRange(
+  range: string,
+  devTab: string = DEV_SHEET_TAB,
+  prefix: string = DEV_TAB_PREFIX,
+): string {
+  const { tab, cells } = splitRange(range);
+
+  // A tab created for this work is already safe — leave it addressed as-is, so
+  // a run can use several of its own tabs instead of being funnelled into one.
+  // Anything else (every pre-existing live tab) is redirected.
+  if (tab && isDevTab(tab, devTab, prefix)) return `${quoteTab(tab)}!${cells}`;
+
   return `${quoteTab(devTab)}!${cells}`;
 }
 
@@ -90,6 +100,61 @@ function rewriteRangesIn(params: any, devTab: string): any {
  *   a tab) address tabs by NUMERIC sheetId, which cannot be checked against a
  *   tab name. Guessing could delete a live tab, so it is blocked outright.
  */
+/**
+ * Decide whether a structural change may proceed under an active tab lock.
+ *
+ * Permitted: addSheet, but only for a tab belonging to this development run
+ * (name matches DEV_TAB_PREFIX, or equals DEV_SHEET_TAB). Creating our own
+ * scratch tabs is the point of being able to work here at all.
+ *
+ * Refused: everything else. deleteSheet, updateSheetProperties (rename),
+ * duplicateSheet and friends address tabs by NUMERIC sheetId, which cannot be
+ * checked against a tab name — permitting them could delete or rename a live
+ * tab. There is no safe way to allow those without resolving ids first.
+ */
+export function assertStructuralChangeAllowed(
+  params: any,
+  opts: { active?: boolean; devTab?: string; prefix?: string } = {},
+): void {
+  const active = opts.active ?? TAB_LOCK_ACTIVE;
+  const devTab = opts.devTab ?? DEV_SHEET_TAB;
+  const prefix = opts.prefix ?? DEV_TAB_PREFIX;
+  if (!active) return;
+
+  const requests = params?.requestBody?.requests ?? params?.resource?.requests;
+  if (!Array.isArray(requests) || requests.length === 0) {
+    throw new TabGuardViolation(
+      'A structural spreadsheet change was attempted with no readable request ' +
+      'list, so it cannot be checked. Refusing while the tab lock is active.'
+    );
+  }
+
+  for (const req of requests) {
+    const kind = Object.keys(req ?? {})[0];
+
+    if (kind === 'addSheet') {
+      const title = String(req.addSheet?.properties?.title ?? '').trim();
+      if (!title) throw new TabGuardViolation('addSheet with no title — refusing.');
+      if (!isDevTab(title, devTab, prefix)) {
+        throw new TabGuardViolation(
+          `Refusing to create the tab "${title}": it is not a development tab. ` +
+          `Development tabs must start with "${prefix}" (or equal ` +
+          `"${devTab}"), so this run can never create, shadow or collide ` +
+          `with a live tab.`
+        );
+      }
+      continue;
+    }
+
+    throw new TabGuardViolation(
+      `Structural request "${kind}" is blocked while the tab lock is active. ` +
+      `It addresses tabs by numeric sheetId, which cannot be verified against a ` +
+      `tab name, so it could alter or delete a live tab. Only addSheet for a ` +
+      `"${prefix}*" tab is permitted; do anything else by hand.`
+    );
+  }
+}
+
 export function guardSheetsClient<T extends Record<string, any>>(client: T): T {
   if (!TAB_LOCK_ACTIVE) return client;
 
@@ -111,14 +176,9 @@ export function guardSheetsClient<T extends Record<string, any>>(client: T): T {
 
   const originalBatchUpdate = client.spreadsheets.batchUpdate;
   if (typeof originalBatchUpdate === 'function') {
-    client.spreadsheets.batchUpdate = function () {
-      throw new TabGuardViolation(
-        `Structural spreadsheet changes are blocked while the tab lock is active ` +
-        `(development run confined to "${devTab}").\n` +
-        `  spreadsheets.batchUpdate addresses tabs by numeric sheetId, which cannot ` +
-        `be verified against a tab name, so it could alter or delete a live tab.\n` +
-        `  Make structural changes by hand in the spreadsheet instead.`
-      );
+    client.spreadsheets.batchUpdate = function (params: any, ...rest: any[]) {
+      assertStructuralChangeAllowed(params);
+      return originalBatchUpdate.call(this, params, ...rest);
     };
   }
 
@@ -128,6 +188,6 @@ export function guardSheetsClient<T extends Record<string, any>>(client: T): T {
 /** One-line description for the startup banner. */
 export function describeTabLock(): string {
   return TAB_LOCK_ACTIVE
-    ? `TAB LOCK ACTIVE — all reads/writes confined to "${DEV_SHEET_TAB}"`
+    ? `TAB LOCK ACTIVE — confined to "${DEV_SHEET_TAB}" and "${DEV_TAB_PREFIX}*" tabs`
     : 'tab lock inactive';
 }

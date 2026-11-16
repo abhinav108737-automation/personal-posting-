@@ -131,3 +131,24 @@ export const DEV_SHEET_TAB: string =
 
 /** True when every read/write must be rewritten onto DEV_SHEET_TAB. */
 export const TAB_LOCK_ACTIVE = KEN_ENV === 'development' && DEV_SHEET_TAB !== '';
+
+/**
+ * Tabs a development run is allowed to create and use. Any tab whose name
+ * starts with this prefix is ours; every pre-existing live tab (Social Media,
+ * Blogs, New Logic, ...) does not match and stays untouchable.
+ *
+ * Defaults to "Test_" so that DEV_SHEET_TAB=Test_Abhinav works out of the box.
+ */
+export const DEV_TAB_PREFIX: string =
+  (process.env.KEN_DEV_TAB_PREFIX ?? 'Test_').trim();
+
+/** True if `tab` is a development tab this run may read, write and create. */
+export function isDevTab(
+  tab: string,
+  devTab: string = DEV_SHEET_TAB,
+  prefix: string = DEV_TAB_PREFIX,
+): boolean {
+  if (!tab) return false;
+  if (devTab !== '' && tab === devTab) return true;
+  return prefix !== '' && tab.startsWith(prefix);
+}

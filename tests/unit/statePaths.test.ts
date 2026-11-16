@@ -47,9 +47,11 @@ describe('state paths follow cwd', () => {
 });
 
 describe('startup banner', () => {
-  test('states plainly when the run is against production', () => {
+  test('always names the environment it is running in', () => {
+    // Must hold however the suite was launched, so assert on the env the
+    // banner reports rather than assuming production.
     const banner = buildStartupBanner(REPO);
-    assert.match(banner, /production/i);
+    assert.match(banner, /KEN_ENV=(development|production)/);
   });
 
   test('never prints a full spreadsheet id', () => {
