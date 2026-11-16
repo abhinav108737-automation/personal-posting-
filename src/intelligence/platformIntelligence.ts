@@ -94,13 +94,26 @@ export function computePlatformStats(opts: ComputeOptions): PlatformWindowStats[
       WHERE LOWER(pp.platform) IN (?, ?) AND pp.posted_at >= ?`
     ).get(p.key.toLowerCase(), p.name.toLowerCase(), windowStart) as any;
 
-    // GA4 attributes traffic by utm_source, which the posting code already sets.
+    // GA4 attributes traffic by utm_source, which the posting code already sets
+    // on every outbound link (see src/utils/utm.ts).
+    //
+    // Storage convention comes from collectors/ga4.ts and MUST be matched
+    // exactly: platform rows use metric_scope='utm_source' and pack the
+    // dimension as '<sessionSource>|<sessionCampaign>'. Matching the source
+    // part therefore needs a prefix comparison, not equality — an earlier
+    // equality match silently returned zero sessions for every platform,
+    // which would have made the whole estate look dead.
     const traffic = db.prepare(
       `SELECT SUM(sessions) AS sessions, SUM(clicks) AS clicks, SUM(impressions) AS impressions
          FROM url_performance
-        WHERE metric_scope = 'source' AND LOWER(dimension_value) = ?
+        WHERE metric_scope = 'utm_source'
+          AND (LOWER(dimension_value) = ? OR LOWER(dimension_value) LIKE ? )
           AND metric_date >= ? AND metric_date <= ?`
-    ).get(p.utmSource.toLowerCase(), windowStart, windowEnd) as any;
+    ).get(
+      p.utmSource.toLowerCase(),
+      `${p.utmSource.toLowerCase()}|%`,
+      windowStart, windowEnd,
+    ) as any;
 
     const leadRow = db.prepare(
       `SELECT COUNT(*) AS c FROM leads

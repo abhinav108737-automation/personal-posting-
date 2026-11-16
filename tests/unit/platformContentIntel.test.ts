@@ -214,3 +214,45 @@ describe('content stats end to end', () => {
     assert.ok(out.every(c => c.r === null), 'n=1 must not produce a correlation');
   });
 });
+
+describe('GA4 attribution convention (regression)', () => {
+  test('platform traffic is read using the convention ga4.ts actually writes', () => {
+    // ga4.ts stores platform rows as metric_scope='utm_source' with
+    // dimension_value='<source>|<campaign>'. Reading with metric_scope='source'
+    // and an equality match silently returned 0 sessions for every platform.
+    addPost('HackMD', 'https://hackmd.io/a');
+    db.prepare(`INSERT INTO url_performance
+      (url, source, metric_date, metric_scope, dimension_value, sessions, collected_at)
+      VALUES (?,?,?,?,?,?,?)`)
+      .run('(property)', 'ga4', '2026-11-10', 'utm_source', 'hackmd|automation', 250, nowIso());
+
+    const stats = computePlatformStats({ db, windowDays: 365, endDate: '2026-11-16' });
+    const hackmd = stats.find(s => s.platform === 'HackMD')!;
+    assert.equal(hackmd.sessions, 250, 'sessions must be found despite the packed dimension');
+    assert.ok(hackmd.sessionsPerPost !== null && hackmd.sessionsPerPost > 0);
+  });
+
+  test('a bare source value with no campaign suffix also matches', () => {
+    addPost('Medium', 'https://medium.com/p/x');
+    db.prepare(`INSERT INTO url_performance
+      (url, source, metric_date, metric_scope, dimension_value, sessions, collected_at)
+      VALUES (?,?,?,?,?,?,?)`)
+      .run('(property)', 'ga4', '2026-11-10', 'utm_source', 'medium', 40, nowIso());
+
+    const stats = computePlatformStats({ db, windowDays: 365, endDate: '2026-11-16' });
+    assert.equal(stats.find(s => s.platform === 'Medium')!.sessions, 40);
+  });
+
+  test('one platform does not absorb another whose name is a prefix', () => {
+    addPost('LinkedIn', 'https://linkedin.com/p/x');
+    db.prepare(`INSERT INTO url_performance
+      (url, source, metric_date, metric_scope, dimension_value, sessions, collected_at)
+      VALUES (?,?,?,?,?,?,?)`)
+      .run('(property)', 'ga4', '2026-11-10', 'utm_source', 'linkedin-pulse|automation', 99, nowIso());
+
+    const stats = computePlatformStats({ db, windowDays: 365, endDate: '2026-11-16' });
+    assert.equal(stats.find(s => s.platform === 'LinkedIn')!.sessions, 0,
+      'linkedin must not absorb linkedin-pulse traffic');
+    assert.equal(stats.find(s => s.platform === 'LinkedinPulse')!.sessions, 99);
+  });
+});
