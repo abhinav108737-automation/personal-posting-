@@ -10,6 +10,7 @@
 import { google } from 'googleapis';
 import 'dotenv/config';
 import { MAIN_SHEET_ID } from '../config/sheetIds.js';
+import { guardSheetsClient } from '../config/tabGuard.js';
 
 // ──── History-safe helpers ──────────────────────────────────────────────────
 
@@ -372,7 +373,7 @@ async function getSheetsClient() {
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
   });
 
-  return google.sheets({ version: 'v4', auth });
+  return guardSheetsClient(google.sheets({ version: 'v4', auth }));
 }
 
 // ──── Column map (0-indexed, header-row-driven) ──────────────────────────

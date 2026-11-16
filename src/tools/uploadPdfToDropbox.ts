@@ -3,6 +3,7 @@ import { google } from 'googleapis';
 import fs from 'fs';
 import { uploadFileToDropbox } from '../utils/dropboxUpload.js';
 import { MAIN_SHEET_ID } from '../config/sheetIds.js';
+import { guardSheetsClient } from '../config/tabGuard.js';
 
 const BLOG_SHEET_ID = MAIN_SHEET_ID;
 const BLOG_SHEET_NAME = 'Blogs';
@@ -29,7 +30,7 @@ async function getSheetsClient() {
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
   });
 
-  return google.sheets({ version: 'v4', auth });
+  return guardSheetsClient(google.sheets({ version: 'v4', auth }));
 }
 
 function buildColMap(headers: string[]): Record<string, number> {

@@ -70,6 +70,8 @@ export function resolveSheetId(
   const override = env[envName]?.trim();
 
   if (kenEnv === 'development') {
+    const devTab = (env.KEN_DEV_SHEET_TAB ?? '').trim();
+
     if (!override) {
       throw new Error(
         `[sheetIds] KEN_ENV=development but ${envName} is not set. ` +
@@ -77,13 +79,27 @@ export function resolveSheetId(
         `Set ${envName} to your development spreadsheet id.`
       );
     }
+
     if (isProductionId(override)) {
-      throw new Error(
-        `[sheetIds] KEN_ENV=development but ${envName} resolves to a PRODUCTION ` +
-        `spreadsheet id. Refusing to start — a development run must never read ` +
-        `or write production data. Set ${envName} to your development spreadsheet id.`
-      );
+      // Tab-scoped development: the test tab lives INSIDE the production
+      // spreadsheet, so the spreadsheet id is legitimately a production id.
+      // This is only permitted when a dev tab is named, because the tab guard
+      // (config/tabGuard.ts) then confines every read and write to that one
+      // tab and blocks every other tab by name.
+      if (!devTab) {
+        throw new Error(
+          `[sheetIds] KEN_ENV=development but ${envName} resolves to a PRODUCTION ` +
+          `spreadsheet id, and KEN_DEV_SHEET_TAB is not set. Refusing to start.
+` +
+          `  Either point ${envName} at a separate development spreadsheet,
+` +
+          `  or set KEN_DEV_SHEET_TAB to the test tab inside it (e.g. Test_Abhinav), ` +
+          `which confines all access to that single tab.`
+        );
+      }
+      return override;
     }
+
     return override;
   }
 
@@ -105,3 +121,13 @@ export function maskId(id: string): string {
 export function describeSheetConfig(): string {
   return `env=${KEN_ENV} main=${maskId(MAIN_SHEET_ID)} distributedUrl=${maskId(DISTRIBUTED_URL_SHEET_ID)}`;
 }
+
+/**
+ * The single tab a development run is confined to, when testing against a tab
+ * inside the production spreadsheet. Empty in production.
+ */
+export const DEV_SHEET_TAB: string =
+  KEN_ENV === 'development' ? (process.env.KEN_DEV_SHEET_TAB ?? '').trim() : '';
+
+/** True when every read/write must be rewritten onto DEV_SHEET_TAB. */
+export const TAB_LOCK_ACTIVE = KEN_ENV === 'development' && DEV_SHEET_TAB !== '';

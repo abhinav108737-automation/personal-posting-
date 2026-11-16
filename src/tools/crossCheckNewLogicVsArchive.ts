@@ -8,6 +8,7 @@
 import 'dotenv/config';
 import { google } from 'googleapis';
 import { MAIN_SHEET_ID } from '../config/sheetIds.js';
+import { guardSheetsClient } from '../config/tabGuard.js';
 
 const SHEET_ID = MAIN_SHEET_ID;
 
@@ -16,7 +17,7 @@ async function getSheetsClient() {
     keyFile: '.accounts/google-service-account.json',
     scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
   });
-  return google.sheets({ version: 'v4', auth: await auth.getClient() as any });
+  return guardSheetsClient(google.sheets({ version: 'v4', auth: await auth.getClient() as any }));
 }
 
 (async () => {

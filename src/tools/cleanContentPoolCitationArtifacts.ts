@@ -11,6 +11,7 @@ import 'dotenv/config';
 import { google } from 'googleapis';
 import fs from 'fs';
 import { MAIN_SHEET_ID } from '../config/sheetIds.js';
+import { guardSheetsClient } from '../config/tabGuard.js';
 
 const SPREADSHEET_ID = MAIN_SHEET_ID;
 const SHEET_NAME = 'Content Pool';
@@ -32,7 +33,7 @@ async function getSheetsClient() {
     credentials = JSON.parse(raw);
   }
   const auth = new google.auth.GoogleAuth({ credentials, scopes: ['https://www.googleapis.com/auth/spreadsheets'] });
-  return google.sheets({ version: 'v4', auth });
+  return guardSheetsClient(google.sheets({ version: 'v4', auth }));
 }
 
 function findCol(headers: string[], name: string): number {

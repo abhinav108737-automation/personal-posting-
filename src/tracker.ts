@@ -10,6 +10,7 @@
 import { google } from 'googleapis';
 import 'dotenv/config';
 import { MAIN_SHEET_ID } from './config/sheetIds.js';
+import { guardSheetsClient } from './config/tabGuard.js';
 
 // ──── Sheet config ────────────────────────────────────────────────────────
 
@@ -57,7 +58,7 @@ async function getSheetsClient() {
     credentials,
     scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
   });
-  return google.sheets({ version: 'v4', auth });
+  return guardSheetsClient(google.sheets({ version: 'v4', auth }));
 }
 
 // ──── Column resolver ─────────────────────────────────────────────────────

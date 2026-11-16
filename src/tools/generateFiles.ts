@@ -6,6 +6,7 @@ import { htmlToPdf, makeSlug } from '../utils/contentConverter.js';
 import { savePdfPath } from '../sheets/sheets.js';
 import type { SheetRow } from '../sheets/sheets.js';
 import { MAIN_SHEET_ID } from '../config/sheetIds.js';
+import { guardSheetsClient } from '../config/tabGuard.js';
 
 const BLOG_SHEET_ID   = MAIN_SHEET_ID;
 const BLOG_SHEET_NAME = 'Blogs';
@@ -25,7 +26,7 @@ async function getSheetsClient() {
     credentials,
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
   });
-  return google.sheets({ version: 'v4', auth });
+  return guardSheetsClient(google.sheets({ version: 'v4', auth }));
 }
 
 // ──── Read all blog rows ─────────────────────────────────────────────────────

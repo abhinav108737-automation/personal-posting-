@@ -23,6 +23,8 @@ import {
   IS_DEVELOPMENT,
   MAIN_SHEET_ID,
   DISTRIBUTED_URL_SHEET_ID,
+  DEV_SHEET_TAB,
+  TAB_LOCK_ACTIVE,
   maskId,
 } from './sheetIds.js';
 
@@ -70,6 +72,10 @@ export function buildStartupBanner(cwd: string = process.cwd()): string {
   lines.push('─'.repeat(72));
   if (IS_DEVELOPMENT) {
     lines.push('  KEN_ENV=development — DEVELOPMENT RUN (isolated)');
+    if (TAB_LOCK_ACTIVE) {
+      lines.push(`  TAB LOCK ACTIVE — every read/write confined to "${DEV_SHEET_TAB}"`);
+      lines.push('  Structural spreadsheet changes are blocked.');
+    }
   } else {
     lines.push('  KEN_ENV=production — ⚠️  RUNNING AGAINST LIVE PRODUCTION DATA');
     lines.push('  Writes go to the production spreadsheets and real accounts.');
