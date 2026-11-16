@@ -168,7 +168,10 @@ export function sanitiseInterlinkLimits(
     // Only a real number counts. A numeric STRING is still a configuration
     // error, and guessing what "3" meant is how a cap quietly disappears.
     if (typeof value !== 'number' || !Number.isFinite(value)) {
-      warn(`[weights] INTERLINK_LIMITS_JSON.${key} is not a finite number (${JSON.stringify(value)}) — using the default ${DEFAULT_INTERLINK_LIMITS[key]}.`);
+      // JSON.stringify(NaN) is "null", which would make the warning lie about
+      // what was actually configured.
+      const shown = typeof value === 'number' ? String(value) : JSON.stringify(value);
+      warn(`[weights] INTERLINK_LIMITS_JSON.${key} is not a finite number (${shown}) — using the default ${DEFAULT_INTERLINK_LIMITS[key]}.`);
       continue;
     }
 

@@ -19,7 +19,7 @@ import {
   countLinks, containsLinkTo, linkKey, linkRanges,
   paragraphRejection, findBestParagraph,
   generateAnchorText, isBannedAnchor, BANNED_ANCHORS, MAX_ANCHOR_CHARS,
-  selectSources, selectDestinations, destinationGap,
+  selectSources, selectDestinations, destinationGap, normaliseIndexation,
   paragraphHash, insertProposal, activeProposalsForSource,
   proposalsForDestinationSince, lastEditOfSource,
   generateProposals, formatProposalRun,
@@ -885,6 +885,26 @@ describe('generateProposals', () => {
     assert.ok(loose.created <= 1, 'limit argument must not exceed maxLinksAddedPerRun');
   });
 
+  test('REGRESSION: a junk limit or junk limits object never removes the cap', async () => {
+    // Was: Math.min(NaN, n) -> NaN and every `created >= NaN` is false, so a
+    // mistyped --limit, or a limits object that had been through JSON, silently
+    // turned the per-run cap off entirely.
+    seedBasic();
+    for (const junk of [NaN, Infinity, -Infinity]) {
+      const r = await withProposalFlags(() =>
+        generateProposals({ db, fetchSourceText: feed(BODY), now: NOW, limit: junk as any }));
+      assert.ok(Number.isFinite(r.created), `limit=${String(junk)} produced ${r.created}`);
+      assert.ok(r.created <= DEFAULT_INTERLINK_LIMITS.maxLinksAddedPerRun,
+        `limit=${String(junk)} exceeded the configured cap`);
+    }
+    const r2 = await withProposalFlags(() =>
+      generateProposals({ db, fetchSourceText: feed(BODY), now: NOW,
+        limits: { maxLinksAddedPerRun: 'none' } as any }));
+    assert.ok(r2.created <= DEFAULT_INTERLINK_LIMITS.maxLinksAddedPerRun);
+    assert.ok(Number.isFinite(r2.limits.maxLinksAddedPerRun),
+      'the limits reported back must be the sanitised ones actually applied');
+  });
+
   test('maxLinksPerDestinationPerWeek is enforced from existing rows', async () => {
     seedBasic();
     for (let i = 0; i < 5; i++) {
@@ -973,5 +993,140 @@ describe('formatProposalRun', () => {
   test('handles an empty run', () => {
     const out = formatProposalRun({ created: 0, considered: 0, skipped: {}, proposals: [], limits: DEFAULT_INTERLINK_LIMITS });
     assert.ok(out.includes('0 created'));
+  });
+});
+
+// ── 7. adversarial regressions ───────────────────────────────────────────────
+//
+// Each test here corresponds to a defect that was actually present and is now
+// fixed. They are written as "the unsafe thing must not happen", not as "the
+// current code does X", so they keep their meaning if the implementation moves.
+
+describe('adversarial regressions', () => {
+  test('an unrecognised indexation status is read as unknown, never as indexed', () => {
+    // The dangerous direction: an unrecognised status falling through to the
+    // "indexed" branch means a page we know nothing about is recorded as
+    // already strong, and (at a good position) dropped from consideration
+    // entirely. Absence of evidence must never read as evidence.
+    const unknownGap = destinationGap('unknown', 5);
+    for (const junk of ['soft_404', '', 'NOT_INDEXED', 'Indexed', null, undefined, 7]) {
+      assert.equal(destinationGap(junk as any, 5), unknownGap,
+        `destinationGap(${JSON.stringify(junk)}) should match the 'unknown' gap`);
+    }
+    // And the real statuses are untouched.
+    assert.equal(destinationGap('not_indexed', 5), 1);
+    assert.equal(destinationGap('indexed', 5), 0);
+    assert.ok(destinationGap('unknown', 5) < destinationGap('not_indexed', 5),
+      'an unknown must never outrank a confirmed gap');
+  });
+
+  test('normaliseIndexation coerces anything unrecognised to unknown', () => {
+    assert.equal(normaliseIndexation('indexed'), 'indexed');
+    assert.equal(normaliseIndexation('not_indexed'), 'not_indexed');
+    assert.equal(normaliseIndexation('unknown'), 'unknown');
+    for (const junk of [null, undefined, '', 'NOT_INDEXED', 'soft_404', 0, {}]) {
+      assert.equal(normaliseIndexation(junk), 'unknown');
+    }
+  });
+
+  test('a page is never proposed a link to itself', async () => {
+    // Reachable whenever one row's published_url coincides with another row's
+    // report_url. Comparing the destination only against the source's own
+    // report_url misses it, and the result is a page linking to itself.
+    const SELF = 'https://www.kenresearch.com/industry-reports/india-hospital-market-outlook-2030';
+    addPost({ platform: 'hackmd', published_url: SELF, posted_at: isoAgo(500),
+      report_url: 'https://www.kenresearch.com/industry-reports/some-other-report',
+      title: DEST_TITLE });
+    addPost({ platform: 'medium', published_url: 'https://medium.com/@ken/dest',
+      posted_at: isoAgo(500), report_url: SELF, title: DEST_TITLE });
+    addIndexation(SELF, 'not_indexed');
+
+    const res = await withProposalFlags(() =>
+      generateProposals({ db, fetchSourceText: feed(BODY), now: NOW }));
+
+    for (const p of res.proposals) {
+      assert.notEqual(linkKey(p.destinationUrl), linkKey(p.sourceUrl),
+        `proposal #${p.id} links ${p.sourceUrl} to itself`);
+    }
+    assert.ok((res.skipped.self_link ?? 0) > 0, 'the self-link should have been counted as skipped');
+  });
+
+  test('every generated proposal can actually be applied by the applier', async () => {
+    // A 'descriptive' anchor is derived from the destination title and does not
+    // occur in the paragraph, so the applier can only ever refuse it. Such a
+    // proposal would sit in the approval queue as a guaranteed no-op.
+    seedBasic();
+    const res = await withProposalFlags(() =>
+      generateProposals({ db, fetchSourceText: feed(BODY), now: NOW }));
+    assert.ok(res.created > 0, 'this fixture should produce at least one proposal');
+    for (const p of res.proposals) {
+      assert.equal(p.anchorStrategy, 'verbatim',
+        `proposal #${p.id} has a ${p.anchorStrategy} anchor, which no applier can insert`);
+      assert.ok(BODY.toLowerCase().includes(p.anchorText.toLowerCase()),
+        `anchor "${p.anchorText}" does not occur in the source text`);
+    }
+  });
+
+  test('a stored proposal always contains its own anchor', async () => {
+    seedBasic();
+    await withProposalFlags(() => generateProposals({
+      db,
+      // Relevant enough to clear minRelevanceToPropose through stem and bigram
+      // overlap, but the destination title phrase itself never appears.
+      fetchSourceText: feed(
+        'Hospitals across India reported outlook figures for 2030 that place the market ' +
+        'for hospital care and India wide outlook spending well above earlier estimates ' +
+        'made for this market by analysts covering 2030 and the years immediately after.'),
+      now: NOW,
+    }));
+    const stored = db.prepare(
+      'SELECT anchor_text, paragraph_excerpt FROM interlink_proposals').all() as any[];
+    for (const row of stored) {
+      assert.ok(String(row.paragraph_excerpt).toLowerCase().includes(String(row.anchor_text).toLowerCase()),
+        `stored proposal anchor "${row.anchor_text}" is not present in its own paragraph`);
+    }
+  });
+
+  test('a non-finite --limit cannot remove the per-run cap', async () => {
+    // Math.min(NaN, cap) is NaN, and `n >= NaN` is always false — a cap that
+    // silently stops existing.
+    for (let i = 0; i < 25; i++) {
+      addPost({ platform: 'hackmd', published_url: `https://hackmd.io/@ken/bulk-${i}`,
+        posted_at: isoAgo(500), report_url: `https://www.kenresearch.com/industry-reports/r-${i}`,
+        title: `India Hospital Market Outlook 2030 number ${i}` });
+      addIndexation(`https://www.kenresearch.com/industry-reports/r-${i}`, 'not_indexed');
+    }
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, undefined]) {
+      db.prepare('DELETE FROM interlink_proposals').run();
+      const res = await withProposalFlags(() => generateProposals({
+        db, limit: bad as any, fetchSourceText: feed(BODY), now: NOW,
+      }));
+      assert.ok(res.created <= DEFAULT_INTERLINK_LIMITS.maxLinksAddedPerRun,
+        `limit=${String(bad)} produced ${res.created} proposals, above the cap`);
+    }
+  });
+
+  test('a caller-supplied limits object is sanitised, not trusted', async () => {
+    for (let i = 0; i < 25; i++) {
+      addPost({ platform: 'hackmd', published_url: `https://hackmd.io/@ken/bulk-${i}`,
+        posted_at: isoAgo(500), report_url: `https://www.kenresearch.com/industry-reports/r-${i}`,
+        title: `India Hospital Market Outlook 2030 number ${i}` });
+      addIndexation(`https://www.kenresearch.com/industry-reports/r-${i}`, 'not_indexed');
+    }
+    const poisoned = {
+      maxNewLinksPerSourcePage: Number.NaN,
+      maxLinksAddedPerRun: Number.NaN,
+      maxLinksPerDestinationPerWeek: Number.NaN,
+      minRelevanceToPropose: Number.NaN,
+      minParagraphWords: Number.NaN,
+      cooldownHours: Number.NaN,
+    } as unknown as InterlinkLimits;
+    const res = await withProposalFlags(() => generateProposals({
+      db, fetchSourceText: feed(BODY), now: NOW, limits: poisoned,
+    }));
+    assert.ok(res.created <= DEFAULT_INTERLINK_LIMITS.maxLinksAddedPerRun);
+    for (const [k, v] of Object.entries(res.limits)) {
+      assert.ok(Number.isFinite(v), `limit ${k} survived as ${v}`);
+    }
   });
 });

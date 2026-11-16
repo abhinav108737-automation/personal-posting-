@@ -32,6 +32,7 @@ import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { fileURLToPath } from 'url';
 
 import {
   openDb, dbPath, closeDb, currentVersion, migrate, nowIso, isoDate, daysAgo,
@@ -144,6 +145,44 @@ export function flagNum(a: ParsedArgs, name: string, def: number): number {
 
 export function flagBool(a: ParsedArgs, name: string): boolean {
   return a.flags[name] === true || a.flags[name] === 'true' || a.flags[name] === '1';
+}
+
+/** Nobody has a legitimate reason to ask one command for more than this. */
+export const MAX_LIMIT = 10_000;
+/** Ten years. Anything larger is a typo, not a window. */
+export const MAX_DAYS = 3650;
+
+/**
+ * An integer flag, clamped. Three real failures this prevents:
+ *
+ *  - `--limit 2.7` — node:sqlite binds integers only, so a fractional LIMIT
+ *    crashed the command with the opaque message "datatype mismatch".
+ *  - `--limit -1`  — in SQLite a NEGATIVE limit means "no limit at all", so
+ *    `index-check --limit -1` would have sent every post we know to a paid
+ *    SERP provider. The opposite of what the operator typed.
+ *  - `--days 1e400` — Infinity, which then propagates into date arithmetic.
+ *
+ * A non-numeric value falls back to the default rather than failing: the
+ * command still does something sensible and says what it did.
+ */
+export function flagInt(
+  a: ParsedArgs, name: string, def: number, min: number, max: number,
+): number {
+  const raw = flagStr(a, name);
+  if (raw === undefined) return def;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return def;
+  return Math.min(max, Math.max(min, Math.floor(n)));
+}
+
+/** Row limits: non-negative integers, capped. `def` is used when unset. */
+export function flagLimit(a: ParsedArgs, def: number): number {
+  return flagInt(a, 'limit', def, 0, MAX_LIMIT);
+}
+
+/** Window sizes: at least one day, at most ten years. */
+export function flagDays(a: ParsedArgs, def: number): number {
+  return flagInt(a, 'days', def, 1, MAX_DAYS);
 }
 
 // ── Masking ──────────────────────────────────────────────────────────────────
@@ -447,7 +486,7 @@ async function cmdCollect(args: ParsedArgs, out: Out, env: NodeJS.ProcessEnv): P
 
     const creds = checkCredentials(env);
     const credFor = (name: string) => creds.find(c => c.feature === name)!;
-    const days = flagNum(args, 'days', 7);
+    const days = flagDays(args, 7);
     let ran = 0;
     let skipped = 0;
 
@@ -512,7 +551,7 @@ async function cmdIngest(args: ParsedArgs, out: Out): Promise<number> {
   const h = openHandle(args);
   try {
     const tabs = (flagStr(args, 'tab') ?? 'Social Media,Blogs').split(',').map(t => t.trim()).filter(Boolean);
-    const limit = flagNum(args, 'limit', Infinity);
+    const limit = flagLimit(args, Infinity);
     const force = flagBool(args, 'force');
 
     out.log(banner('INGEST — sheet to local database', [
@@ -559,7 +598,7 @@ async function cmdIndexCheck(args: ParsedArgs, out: Out): Promise<number> {
       return 0;
     }
 
-    const limit = flagNum(args, 'limit', 25);
+    const limit = flagLimit(args, 25);
     const posts = recentPublishedPosts(h.db, limit);
     if (!posts.length) {
       out.log('No published posts in the database yet — run "ingest" first.');
@@ -604,12 +643,12 @@ async function cmdScore(args: ParsedArgs, out: Out): Promise<number> {
       out.log(`Weights in use when enabled: ${WEIGHTS_VERSION}`);
       return 0;
     }
-    const urls = knownReportUrls(h.db, flagNum(args, 'limit', 50));
+    const urls = knownReportUrls(h.db, flagLimit(args, 50));
     if (!urls.length) {
       out.log('No report URLs known yet — run "ingest" first.');
       return 0;
     }
-    const results = scoreReports(h.db, urls, { windowDays: flagNum(args, 'days', 90) });
+    const results = scoreReports(h.db, urls, { windowDays: flagDays(args, 90) });
     out.log(formatScoreTable(results));
     if (!enabled('SCORING_INFLUENCES_ORDER') || FLAGS.SHADOW_MODE) {
       out.log('');
@@ -630,7 +669,7 @@ async function cmdPlatforms(args: ParsedArgs, out: Out): Promise<number> {
       out.log('FEATURE_PLATFORM_INTELLIGENCE (or FEATURE_INTELLIGENCE) is off — nothing computed.');
       return 0;
     }
-    const verdicts = analysePlatforms({ db: h.db, windowDays: flagNum(args, 'days', 90) });
+    const verdicts = analysePlatforms({ db: h.db, windowDays: flagDays(args, 90) });
     out.log(formatPlatformReport(verdicts));
     return 0;
   } finally {
@@ -647,7 +686,7 @@ async function cmdContent(args: ParsedArgs, out: Out): Promise<number> {
       out.log('FEATURE_CONTENT_INTELLIGENCE (or FEATURE_INTELLIGENCE) is off — nothing computed.');
       return 0;
     }
-    out.log(formatContentReport(analyseContent(h.db, flagNum(args, 'limit', 10))));
+    out.log(formatContentReport(analyseContent(h.db, flagLimit(args, 10))));
     return 0;
   } finally {
     release(h);
@@ -724,7 +763,7 @@ async function cmdPropose(args: ParsedArgs, out: Out): Promise<number> {
 
     const res = await mod.generateProposals({
       db: h.db,
-      limit: flagNum(args, 'limit', limits.maxLinksAddedPerRun),
+      limit: flagLimit(args, limits.maxLinksAddedPerRun),
       fetchSourceText: await buildSourceTextFetcher(out),
     });
     out.log(typeof mod.formatProposalRun === 'function'
@@ -770,7 +809,7 @@ async function cmdQueue(args: ParsedArgs, out: Out): Promise<number> {
   try {
     out.log(banner('PROPOSALS AWAITING HUMAN APPROVAL'));
     out.log('');
-    const rows = proposalsByStatus(h.db, 'proposed', flagNum(args, 'limit', 50));
+    const rows = proposalsByStatus(h.db, 'proposed', flagLimit(args, 50));
     out.log(formatProposals(rows, 'Nothing is waiting for approval — run "propose" first.'));
     if (rows.length) {
       out.log('');
@@ -832,7 +871,7 @@ async function cmdApply(args: ParsedArgs, out: Out): Promise<number> {
   try {
     out.log(live ? LIVE_WARNING : DRY_RUN_BANNER);
 
-    const approved = proposalsByStatus(h.db, 'approved', flagNum(args, 'limit', 50));
+    const approved = proposalsByStatus(h.db, 'approved', flagLimit(args, 50));
     if (!approved.length) {
       out.log('No approved proposals. Run "queue" and approve something first.');
       return 0;
@@ -870,7 +909,12 @@ async function cmdApply(args: ParsedArgs, out: Out): Promise<number> {
     out.log(typeof mod.formatApplySummary === 'function'
       ? mod.formatApplySummary(res)
       : `Applied ${res?.applied ?? 0}, failed ${res?.failed ?? 0}.`);
-    out.log(`Per-run cap: ${DEFAULT_INTERLINK_LIMITS.maxLinksAddedPerRun} link(s).`);
+    // The cap the applier ACTUALLY enforced, not the compiled-in default —
+    // an operator who configured INTERLINK_LIMITS_JSON was being told the
+    // wrong number by the only line that reports it.
+    const effectiveCap = loadInterlinkLimits().maxLinksAddedPerRun;
+    out.log(`Per-run cap: ${effectiveCap} link(s)` +
+      (effectiveCap === DEFAULT_INTERLINK_LIMITS.maxLinksAddedPerRun ? '.' : ' (configured).'));
     return (res?.failed ?? 0) > 0 ? 1 : 0;
   } finally {
     release(h);
@@ -897,7 +941,7 @@ async function cmdCalibrate(args: ParsedArgs, out: Out): Promise<number> {
       out.log(formatCalibrationHistory(h.db));
       return 0;
     }
-    const res = mod.runCalibration(h.db, { windowDays: flagNum(args, 'days', 30) });
+    const res = mod.runCalibration(h.db, { windowDays: flagDays(args, 30) });
     if (!res) {
       out.log('FEATURE_OPPORTUNITY_SCORING (or FEATURE_INTELLIGENCE) is off — nothing to calibrate.');
       out.log('');
@@ -1039,20 +1083,46 @@ export async function runCli(argv: string[], options: RunOptions = {}): Promise<
   }
 }
 
-/** Strip anything that looks like a credential out of an error message. */
+/**
+ * Strip anything that looks like a credential out of an error message.
+ *
+ * The keyword rule allows word characters BETWEEN the keyword and the
+ * separator, because the real-world shape is `"private_key_id": "0123..."`,
+ * not `key: 0123...`. The earlier pattern stopped at the `_` and printed the
+ * value in full. `Bearer <token>` has no keyword at all and needs its own rule.
+ */
 export function redactMessage(msg: string): string {
   return msg
     .replace(/api_token=[^&\s]+/gi, 'api_token=***')
-    .replace(/(key|token|secret|password)["'\s:=]+[A-Za-z0-9._\-]{8,}/gi, '$1=***')
+    .replace(/\b(bearer|basic)\s+[A-Za-z0-9._\-+/=]{8,}/gi, '$1 ***')
+    // The value may not START with "-", so "bad credentials: -----BEGIN ..."
+    // is left intact for the PEM rule below to swallow whole.
+    .replace(
+      /\b([A-Za-z0-9_]*(?:key|token|secret|password|credential)[A-Za-z0-9_]*)["'\s:=]+([A-Za-z0-9._+/][A-Za-z0-9._\-+/]{7,})/gi,
+      '$1=***',
+    )
+    // Last: this replacement text contains the word "key", so running it
+    // before the keyword rule would let that rule chew on its own output.
     .replace(/-----BEGIN [^-]+-----[\s\S]*?-----END [^-]+-----/g, '[private key redacted]');
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
+/**
+ * True only when THIS file is the process entry point.
+ *
+ * Compares the resolved entry against this module's own path. The earlier
+ * version matched any entry file merely NAMED cli.ts/cli.js, so a second,
+ * unrelated CLI anywhere in the repo would have made importing this module
+ * run the whole command dispatcher and then call process.exit().
+ */
 const invokedDirectly = (() => {
   try {
     const entry = process.argv[1] ? path.resolve(process.argv[1]) : '';
-    return entry.endsWith(`${path.sep}cli.ts`) || entry.endsWith(`${path.sep}cli.js`);
+    if (!entry) return false;
+    const self = path.resolve(fileURLToPath(import.meta.url));
+    const strip = (p: string) => p.replace(/\.(ts|js|mts|mjs|cts|cjs)$/i, '');
+    return strip(entry).toLowerCase() === strip(self).toLowerCase();
   } catch { return false; }
 })();
 

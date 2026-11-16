@@ -119,11 +119,51 @@ export function hashParagraph(paragraph: string): string {
 }
 
 /** Split a markdown document into paragraph blocks (blank-line separated). */
+/**
+ * Split into paragraphs on blank lines, but NEVER inside a fenced code block.
+ *
+ * A naive blank-line split tears a fence apart, and the fragment after the
+ * blank line no longer carries its opening ``` marker. Every downstream
+ * "is this code?" check then says no, and a link could be inserted into
+ * published source code. Keeping a fence whole is the only correct fix.
+ */
+function splitOnBlankLinesRespectingFences(text: string): string[] {
+  const lines = String(text ?? '').replace(/\r\n/g, '\n').split('\n');
+  const out: string[] = [];
+  let buf: string[] = [];
+  let fence: string | null = null;
+
+  const flush = () => {
+    const joined = buf.join('\n');
+    if (joined.trim().length > 0) out.push(joined);
+    buf = [];
+  };
+
+  for (const line of lines) {
+    const m = line.match(/^\s*(```+|~~~+)/);
+    if (m) {
+      if (fence === null) {
+        flush();
+        fence = m[1][0];
+        buf.push(line);
+        continue;
+      }
+      if (m[1][0] === fence) {
+        buf.push(line);
+        fence = null;
+        flush();
+        continue;
+      }
+    }
+    if (fence === null && line.trim() === '') { flush(); continue; }
+    buf.push(line);
+  }
+  flush();
+  return out;
+}
+
 export function paragraphsOf(content: string): string[] {
-  return String(content ?? '')
-    .split(/\n\s*\n/)
-    .map(p => p.replace(/\s+$/, ''))
-    .filter(p => p.trim().length > 0);
+  return splitOnBlankLinesRespectingFences(content).map(p => p.replace(/\s+$/, ''));
 }
 
 /** Index of the paragraph whose hash matches, or -1. */
@@ -442,6 +482,15 @@ export async function applyApproved(opts: ApplyOptions): Promise<ApplySummary> {
     if (edited === null) { refuse('unsafe-insertion', 'anchor is absent, repeated inside a link/code, or already linked'); continue; }
 
     const newContent = replaceParagraph(content, paragraphs[idx], edited);
+    // replaceParagraph returns the document UNCHANGED when it cannot find the
+    // block. Writing that back would push an identical document to the live
+    // page and then record the proposal as 'applied' — a link that does not
+    // exist, marked done. Refuse instead; verification is a later, separate
+    // step and must not be the only thing standing between us and a lie.
+    if (newContent === content) {
+      refuse('unsafe-insertion', 'edited paragraph could not be spliced back into the document — nothing to write');
+      continue;
+    }
     changes++;
 
     if (dryRun) {

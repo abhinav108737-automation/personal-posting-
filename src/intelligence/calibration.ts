@@ -165,8 +165,20 @@ export function parseComponents(json: string): {
         signals[key] = missing ? null : clamp01(Number(c.raw));
       }
     }
-    const m = Number(parsed?.recencyMultiplier);
-    if (Number.isFinite(m) && m > 0) recencyMultiplier = clamp01(m);
+    // Three cases must stay distinct:
+    //   explicit 0  -> 0   (a score fully suppressed by recency: legitimate)
+    //   absent/null -> 1   (unknown; JSON turns NaN into null, so they are
+    //                       indistinguishable and both mean "no information")
+    //   negative    -> 1   (impossible; treat as unknown rather than clamping
+    //                       it to 0, which would invent a suppression)
+    // The earlier `Number(x) > 0` guard collapsed the first case into the
+    // second, inflating every fully-penalised score back to full strength and
+    // corrupting the correlation this module exists to measure. Coercing with
+    // Number() first is equally wrong, because Number(null) is 0.
+    const raw = (parsed as any)?.recencyMultiplier;
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) {
+      recencyMultiplier = clamp01(raw);
+    }
   } catch {
     // A corrupt components blob yields an all-missing row rather than a throw:
     // one bad row must not take down a calibration over thousands.
@@ -375,10 +387,35 @@ export interface CalibrationResult {
 /**
  * Standard-error-ish noise band for a Spearman estimate at this sample size,
  * floored at 0.05. An "improvement" smaller than this is not a finding.
+ *
+ * Below n=3 the band is 2, not 1. Spearman lives in [-1, 1], so an improvement
+ * can be as large as 2; a band of 1 would let a two-row dataset flip -1 to +1
+ * and have that reported as a real finding. The band has to cover the whole
+ * attainable range to actually suppress anything at that size.
  */
 export function noiseBandFor(n: number): number {
-  if (n < 3) return 1;
+  if (n < 3) return 2;
   return Math.max(0.05, 1 / Math.sqrt(n - 1));
+}
+
+/**
+ * A floor on the sample size that NO configuration can lower.
+ *
+ * thresholds.calibrationMinimumSample is a policy knob and a caller may tune
+ * it, but it was possible to set it to 2 and get back a confidently-worded
+ * weight table derived from two observations — the noise band could not stop
+ * that, because at n=2 Spearman only takes the values -1, 0 and +1 and any
+ * "improvement" is an artefact of which of two rows happened to come first.
+ * Below this floor there is no rank correlation to estimate, so the answer is
+ * a refusal regardless of what the caller asked for.
+ */
+export const ABSOLUTE_MINIMUM_SAMPLE = 30;
+
+/** The minimum actually enforced: the configured one, never below the floor. */
+export function effectiveMinimumSample(thresholds: Thresholds): number {
+  const configured = Number(thresholds.calibrationMinimumSample);
+  if (!Number.isFinite(configured)) return ABSOLUTE_MINIMUM_SAMPLE;
+  return Math.max(ABSOLUTE_MINIMUM_SAMPLE, Math.floor(configured));
 }
 
 function insufficient(dataset: Dataset, baseline: ScoreWeights, minimum: number): CalibrationResult {
@@ -406,17 +443,19 @@ function insufficient(dataset: Dataset, baseline: ScoreWeights, minimum: number)
 /**
  * Bounded, deterministic coordinate ascent over the seven positive weights.
  *
- * Refuses to propose anything below thresholds.calibrationMinimumSample, and
- * NEVER writes weights.ts — the proposal is persisted with applied = 0 for a
+ * Refuses to propose anything below thresholds.calibrationMinimumSample — or
+ * below ABSOLUTE_MINIMUM_SAMPLE, whichever is larger, so a caller cannot
+ * configure the refusal away. NEVER writes weights.ts — the proposal is persisted with applied = 0 for a
  * human to adopt.
  */
 export function proposeWeights(db: DB, options: ProposeOptions = {}): CalibrationResult {
   const thresholds = options.thresholds ?? DEFAULT_THRESHOLDS;
   const baseline = normaliseWeights(options.baseline ?? loadWeights());
   const dataset = options.dataset ?? buildDataset({ db, ...options });
+  const minimum = effectiveMinimumSample(thresholds);
 
-  if (dataset.n < thresholds.calibrationMinimumSample) {
-    return insufficient(dataset, baseline, thresholds.calibrationMinimumSample);
+  if (dataset.n < minimum) {
+    return insufficient(dataset, baseline, minimum);
   }
 
   const before = evaluateWeights(dataset, baseline);
@@ -448,7 +487,7 @@ export function proposeWeights(db: DB, options: ProposeOptions = {}): Calibratio
   const result: CalibrationResult = {
     status: 'ok',
     sampleSize: dataset.n,
-    minimumSample: thresholds.calibrationMinimumSample,
+    minimumSample: minimum,
     before, after: bestScore, improvement,
     weightsBefore: baseline, weightsAfter: best,
     weightsVersion: WEIGHTS_VERSION,

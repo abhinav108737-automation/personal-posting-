@@ -19,7 +19,7 @@ import os from 'os';
 import path from 'path';
 
 import {
-  parseArgs, flagStr, flagNum, flagBool,
+  parseArgs, flagStr, flagNum, flagBool, flagLimit, flagDays, MAX_LIMIT, MAX_DAYS,
   maskSecret, maskEmail, redactMessage,
   checkCredentials, formatCredentials, formatFlags,
   formatScoreTable, formatTableCounts, formatProposals, formatHelp,
@@ -121,6 +121,35 @@ describe('parseArgs', () => {
   });
 });
 
+describe('integer flags are clamped', () => {
+  test('a fractional --limit becomes an integer', () => {
+    // node:sqlite binds integers only: 2.7 used to crash with "datatype mismatch".
+    assert.equal(flagLimit(parseArgs(['queue', '--limit=2.7']), 50), 2);
+  });
+
+  test('a negative --limit becomes 0, never SQLite "unlimited"', () => {
+    // LIMIT -1 in SQLite means NO limit, the opposite of what was typed.
+    assert.equal(flagLimit(parseArgs(['index-check', '--limit=-1']), 25), 0);
+  });
+
+  test('an absurd --limit is capped', () => {
+    assert.equal(flagLimit(parseArgs(['queue', '--limit=99999999999']), 50), MAX_LIMIT);
+  });
+
+  test('an unparseable --limit falls back to the default', () => {
+    assert.equal(flagLimit(parseArgs(['queue', '--limit=banana']), 50), 50);
+    assert.equal(flagLimit(parseArgs(['queue']), 50), 50);
+  });
+
+  test('--days is at least one day and at most ten years', () => {
+    assert.equal(flagDays(parseArgs(['score', '--days=-30']), 90), 1);
+    assert.equal(flagDays(parseArgs(['score', '--days=999999']), 90), MAX_DAYS);
+    // Infinity is not a window; fall back to the default rather than guessing.
+    assert.equal(flagDays(parseArgs(['score', '--days=1e400']), 90), 90);
+    assert.equal(flagDays(parseArgs(['score', '--days=30']), 90), 30);
+  });
+});
+
 // ── Masking ──────────────────────────────────────────────────────────────────
 
 describe('masking', () => {
@@ -171,6 +200,23 @@ describe('redactMessage', () => {
     const out = redactMessage(`bad credentials: ${pem}`);
     assert.ok(!out.includes('MIIEvQIBADAN'));
     assert.ok(out.includes('[private key redacted]'));
+  });
+
+  test('strips a Bearer token, which carries no keyword at all', () => {
+    const out = redactMessage('401 from GA4: Bearer ya29.averylongoauthtokenvalue123456');
+    assert.ok(!out.includes('ya29.averylongoauthtokenvalue123456'));
+    assert.ok(/Bearer \*\*\*/.test(out));
+  });
+
+  test('strips a JSON credential field whose name continues past the keyword', () => {
+    // "private_key_id" — the keyword rule must not stop at the underscore.
+    const out = redactMessage('bad service account: {"private_key_id":"0123456789abcdef0123"}');
+    assert.ok(!out.includes('0123456789abcdef0123'));
+  });
+
+  test('the PEM placeholder is not itself chewed by the keyword rule', () => {
+    const pem = '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADAN\n-----END PRIVATE KEY-----';
+    assert.ok(redactMessage(pem).includes('[private key redacted]'));
   });
 
   test('leaves an ordinary message alone', () => {
@@ -321,6 +367,24 @@ describe('every command on an empty database', () => {
       assert.equal(code, 0, `${cmd} should exit 0; stderr: ${out.errors.join('\n')}`);
       assert.ok(out.lines.length > 0, `${cmd} printed nothing`);
       assert.ok(!out.text().includes('undefined'), `${cmd} printed "undefined"`);
+    });
+  }
+});
+
+describe('hostile flag values never crash a command', () => {
+  const HOSTILE: Array<[string, string[]]> = [
+    ['fractional limit', ['queue', '--limit', '2.7']],
+    ['negative limit', ['index-check', '--limit', '-1']],
+    ['enormous limit', ['queue', '--limit', '99999999999']],
+    ['non-numeric limit', ['score', '--limit', 'banana']],
+    ['negative days', ['score', '--days', '-30']],
+    ['infinite days', ['platforms', '--days', '1e400']],
+  ];
+  for (const [name, argv] of HOSTILE) {
+    test(name, async () => {
+      const out = bufferOut();
+      const code = await runCli(argv, { out, dbFile: freshDbFile(`hostile-${argv.join('-')}`), env: {} });
+      assert.equal(code, 0, `${name} should exit 0; stderr: ${out.errors.join('\n')}`);
     });
   }
 });

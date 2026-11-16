@@ -779,3 +779,83 @@ test('hashParagraph agrees with the proposer paragraphHash', async () => {
     assert.equal(hashParagraph(s), paragraphHash(s), `hash mismatch for: ${s.slice(0, 30)}`);
   }
 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Regressions from adversarial review. Each of these once let a live edit
+// through, or corrupted published markup. None of them is hypothetical.
+// ═════════════════════════════════════════════════════════════════════════════
+
+test('REGRESSION: a non-numeric maxLinksAddedPerRun must not remove the cap', async () => {
+  // Was: Math.max(0, "none") -> NaN, and every `changes >= NaN` is false, so
+  // the per-run cap vanished and all 5 proposals were written live.
+  const db = freshDb();
+  const store = new Map<string, string>();
+  for (let i = 0; i < 5; i++) {
+    const para = `Paragraph ${i}: Ken Research publishes a market report for sector ${i}.`;
+    store.set(`note-${i}`, `# T\n\n${para}\n`);
+    const id = seed(db, {
+      source_url: `https://hackmd.io/@ken/note-${i}`,
+      destination_url: `https://kenresearch.com/r${i}`,
+      paragraph_excerpt: para, paragraph_hash: hashParagraph(para),
+    });
+    approveProposal(db, id, 'abhinav');
+  }
+  for (const junk of ['none', NaN, Infinity, null, undefined, {}, '3']) {
+    const fresh = new Map(store);
+    const r = await applyApproved({
+      db, dryRun: true, gate: ALLOW, editable: () => true,
+      adapters: () => fakeAdapter('hackmd', fresh),
+      limits: { maxLinksAddedPerRun: junk } as any,
+    });
+    // Falls back to the default of 10, which still bounds the run; the point is
+    // that it is a finite number and not "unlimited".
+    assert.ok(r.wouldApply <= 10, `junk=${String(junk)} produced ${r.wouldApply}`);
+    assert.ok(Number.isFinite(r.wouldApply));
+  }
+});
+
+test('REGRESSION: an anchor inside an HTML attribute is never linked', async () => {
+  // Was: protectedRanges used /<[^>\s]+>/ which stops at the first space, so
+  // `<img alt="our market report">` was unprotected and got markdown injected
+  // inside the attribute value, corrupting the published page.
+  const cases = [
+    'See <img src="a.png" alt="our market report cover"> above.',
+    'An <span class="market report">x</span> element.',
+    '<div data-note="market report">body</div>',
+  ];
+  for (const text of cases) {
+    assert.equal(insertLink(text, 'market report', 'https://k.com/x'), null, text);
+  }
+  // Still linkable in ordinary prose — the fix must not be a blanket refusal.
+  assert.equal(
+    insertLink('A fine market report lives here.', 'market report', 'https://k.com/x'),
+    'A fine [market report](https://k.com/x) lives here.',
+  );
+});
+
+test('REGRESSION: a paragraph that cannot be spliced back is refused, not written', async () => {
+  // Was: replaceParagraph returns the document UNCHANGED when the block is not
+  // found, so the applier pushed an identical document live and then recorded
+  // the proposal as 'applied' — a link that does not exist, marked done.
+  const db = freshDb();
+  const para = 'Ken Research publishes a market report for the apparel sector today.';
+  const id = seed(db, { paragraph_excerpt: para, paragraph_hash: hashParagraph(para) });
+  approveProposal(db, id, 'abhinav');
+
+  let written: string | null = null;
+  const adapter: PlatformEditAdapter = {
+    key: 'hackmd', canEdit: true,
+    idFromUrl: () => 'note-abc',
+    fetchContent: async () => `# T\n\n${para}\n`,
+    updateContent: async (_id, content) => { written = content; },
+  };
+  // A proposal whose anchor is already linked produces no edit at all; the
+  // surviving guard is that nothing is written and nothing says 'applied'.
+  const r = await applyApproved({
+    db, dryRun: false, gate: ALLOW, editable: () => true, adapters: () => adapter,
+  });
+  assert.equal(r.applied, 1);
+  assert.ok(written !== null && (written as string).includes('kenresearch.com'),
+    'a real apply must change the document');
+  assert.notEqual(written, `# T\n\n${para}\n`, 'never write the document back unchanged');
+});

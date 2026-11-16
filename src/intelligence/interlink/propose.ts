@@ -151,12 +151,51 @@ export interface DestinationRef {
  */
 export const MAX_EXISTING_LINKS_PER_PARAGRAPH = 2;
 
+/**
+ * Split into paragraphs on blank lines, but NEVER inside a fenced code block.
+ *
+ * A naive blank-line split tears a fence apart, and the fragment after the
+ * blank line no longer carries its opening ``` marker. Every downstream
+ * "is this code?" check then says no, and a link could be inserted into
+ * published source code. Keeping a fence whole is the only correct fix.
+ */
+function splitOnBlankLinesRespectingFences(text: string): string[] {
+  const lines = String(text ?? '').replace(/\r\n/g, '\n').split('\n');
+  const out: string[] = [];
+  let buf: string[] = [];
+  let fence: string | null = null;
+
+  const flush = () => {
+    const joined = buf.join('\n');
+    if (joined.trim().length > 0) out.push(joined);
+    buf = [];
+  };
+
+  for (const line of lines) {
+    const m = line.match(/^\s*(```+|~~~+)/);
+    if (m) {
+      if (fence === null) {
+        flush();
+        fence = m[1][0];
+        buf.push(line);
+        continue;
+      }
+      if (m[1][0] === fence) {
+        buf.push(line);
+        fence = null;
+        flush();
+        continue;
+      }
+    }
+    if (fence === null && line.trim() === '') { flush(); continue; }
+    buf.push(line);
+  }
+  flush();
+  return out;
+}
+
 export function splitParagraphs(text: string | null | undefined): string[] {
-  return String(text ?? '')
-    .replace(/\r\n/g, '\n')
-    .split(/\n\s*\n/)
-    .map(p => p.trim())
-    .filter(p => p.length > 0);
+  return splitOnBlankLinesRespectingFences(String(text ?? '')).map(p => p.trim());
 }
 
 export function wordCount(text: string): number {
@@ -436,6 +475,24 @@ const SOURCE_INDEX_RANK: Record<IndexationStatus, number> = {
   indexed: 0, unknown: 1, not_indexed: 2,
 };
 
+/**
+ * Coerce anything that is not one of the three legal statuses to 'unknown'.
+ *
+ * The schema has a CHECK constraint on indexation_checks.status, so today the
+ * database cannot hold anything else — but these functions are exported and a
+ * later migration could add a status. The default must be 'unknown' in EVERY
+ * reader, because the alternative is that a value we do not understand falls
+ * through to the 'indexed' branch and reads as "this page is fine, leave it
+ * alone". That is absence of evidence being recorded as evidence, which is the
+ * exact failure this module claims not to make. Comparison is case-sensitive on
+ * purpose: 'NOT_INDEXED' is not a confirmed gap, it is an unexpected value.
+ */
+export function normaliseIndexation(status: unknown): IndexationStatus {
+  return status === 'indexed' || status === 'not_indexed' || status === 'unknown'
+    ? status
+    : 'unknown';
+}
+
 export function selectSources(opts: { db: DB; limit?: number }): SourceCandidate[] {
   const { db, limit = 100 } = opts;
   const rows = db.prepare(`
@@ -458,7 +515,7 @@ export function selectSources(opts: { db: DB; limit?: number }): SourceCandidate
     const url = String(r.published_url);
     if (seen.has(url)) continue;
     seen.add(url);
-    const status = (r.indexation ?? 'unknown') as IndexationStatus;
+    const status = normaliseIndexation(r.indexation);
     out.push({
       publishedPostId: Number(r.id),
       sourceUrl: url,
@@ -466,7 +523,7 @@ export function selectSources(opts: { db: DB; limit?: number }): SourceCandidate
       title: r.title ?? null,
       reportUrl: r.report_url ?? null,
       postedAt: String(r.posted_at ?? ''),
-      indexation: SOURCE_INDEX_RANK[status] === undefined ? 'unknown' : status,
+      indexation: status,
     });
   }
 
@@ -502,8 +559,11 @@ export function destinationGap(
   position: number | null,
   t: Thresholds = DEFAULT_THRESHOLDS,
 ): number {
-  if (indexation === 'not_indexed') return 1;
-  if (indexation === 'unknown') return 0.5;
+  // Anything unrecognised becomes 'unknown' rather than falling through to the
+  // 'indexed' branch below — see normaliseIndexation().
+  const status = normaliseIndexation(indexation);
+  if (status === 'not_indexed') return 1;
+  if (status === 'unknown') return 0.5;
   // Indexed: the gap is now about rank, not visibility.
   if (position === null) return 0.2;
   if (position <= t.rankTopBand) return 0;          // already strong — leave it alone
@@ -529,7 +589,7 @@ export function selectDestinations(opts: { db: DB; limit?: number; thresholds?: 
 
   const out: DestinationCandidate[] = [];
   for (const r of rows) {
-    const indexation = (r.indexation ?? 'unknown') as IndexationStatus;
+    const indexation = normaliseIndexation(r.indexation);
     const position = r.position === null || r.position === undefined ? null : Number(r.position);
     const gap = destinationGap(indexation, position, thresholds);
     if (gap <= 0) continue;
@@ -642,7 +702,8 @@ function hoursBetween(laterIso: string, earlierIso: string): number {
 
 export type SkipReason =
   | 'disabled' | 'no_source_text' | 'self_link' | 'already_linked'
-  | 'no_paragraph' | 'low_relevance' | 'no_anchor' | 'duplicate'
+  | 'no_paragraph' | 'low_relevance' | 'no_anchor' | 'anchor_not_in_paragraph'
+  | 'duplicate'
   | 'source_cap' | 'destination_week_cap' | 'cooldown' | 'run_cap';
 
 export interface GeneratedProposal {
@@ -742,7 +803,18 @@ export async function generateProposals(opts: GenerateOptions): Promise<Generate
 
       considered++;
 
-      if (linkKey(dest.url) === linkKey(source.reportUrl ?? '')) { bump('self_link'); continue; }
+      // Two distinct ways a "self" link can arise, and both must be caught:
+      //   - the destination IS the report this post was written to promote
+      //     (linking a post back to its own subject adds nothing);
+      //   - the destination IS this very page. That happens whenever a row's
+      //     published_url coincides with some other row's report_url, and
+      //     comparing only against reportUrl misses it entirely — the result
+      //     is a page proposed a link to itself.
+      const destKey = linkKey(dest.url);
+      if (destKey === linkKey(source.reportUrl ?? '') || destKey === linkKey(source.sourceUrl)) {
+        bump('self_link');
+        continue;
+      }
       if (containsLinkTo(text, dest.url)) { bump('already_linked'); continue; }
 
       if (proposalsForDestinationSince(db, dest.url, weekAgo) >= limits.maxLinksPerDestinationPerWeek) {
@@ -756,6 +828,15 @@ export async function generateProposals(opts: GenerateOptions): Promise<Generate
 
       const anchor = generateAnchorText(pick.paragraph, dest.title ?? dest.slug);
       if (!anchor.anchor) { bump('no_anchor'); continue; }
+      // A DESCRIPTIVE anchor is derived from the destination title and by
+      // definition does not occur in the paragraph. apply.ts inserts a link by
+      // wrapping an existing occurrence, so such a proposal can only ever be
+      // refused as 'unsafe-insertion'. Generating it anyway would put something
+      // in the approval queue that cannot be applied however the human votes —
+      // review time spent on a guaranteed no-op. generateAnchorText keeps the
+      // descriptive fallback (it is useful on its own, and tested directly);
+      // the RUN declines to propose on it.
+      if (!anchor.foundInParagraph) { bump('anchor_not_in_paragraph'); continue; }
 
       const rationale =
         `relevance ${pick.score.toFixed(2)} (lexical) · paragraph #${pick.index} · ` +

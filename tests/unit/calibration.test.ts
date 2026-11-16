@@ -15,6 +15,7 @@ import {
   rankValues, pearson, spearman,
   scoreRowWithWeights, evaluateWeights, proposeWeights, noiseBandFor,
   runCalibration, formatCalibrationReport,
+  ABSOLUTE_MINIMUM_SAMPLE, effectiveMinimumSample,
   type Dataset, type DatasetRow, type PositiveSignal,
 } from '../../src/intelligence/calibration.js';
 import { DEFAULT_WEIGHTS, DEFAULT_THRESHOLDS, type ScoreWeights } from '../../src/intelligence/weights.js';
@@ -421,6 +422,40 @@ describe('proposeWeights safety', () => {
     assert.ok(JSON.parse(String(saved.weights_after)).historicalLeads > 0);
   });
 
+  test('a caller cannot configure the refusal away', () => {
+    // Two rows, engineered so the baseline orders them backwards and one grid
+    // step flips Spearman from -1 to +1. Before the floor existed this came
+    // back as status "ok" with improvement 2 and a full weight table — a
+    // confident recommendation from two observations.
+    const tiny = dataset([
+      row(0, { searchDemand: 1, historicalLeads: 0 }, 1),
+      row(1, { searchDemand: 0, historicalLeads: 1 }, 100),
+    ]);
+    const nearlyTied: ScoreWeights = {
+      ...DEFAULT_WEIGHTS,
+      searchDemand: 0.30, rankingOpportunity: 0.10, indexation: 0.10,
+      historicalTraffic: 0.10, historicalLeads: 0.25, geographic: 0.10,
+      platformSuitability: 0.05,
+    };
+    const r = proposeWeights(db, {
+      dataset: tiny,
+      thresholds: { ...DEFAULT_THRESHOLDS, calibrationMinimumSample: 2 },
+      baseline: nearlyTied, passes: 6, persist: false,
+    });
+    assert.equal(r.status, 'insufficient_data');
+    assert.equal(r.minimumSample, ABSOLUTE_MINIMUM_SAMPLE);
+    assert.equal(r.candidatesEvaluated, 0);
+    assert.deepEqual(r.weightsAfter, r.weightsBefore);
+  });
+
+  test('the enforced minimum is the configured one, never below the floor', () => {
+    assert.equal(effectiveMinimumSample({ ...DEFAULT_THRESHOLDS, calibrationMinimumSample: 0 }), ABSOLUTE_MINIMUM_SAMPLE);
+    assert.equal(effectiveMinimumSample({ ...DEFAULT_THRESHOLDS, calibrationMinimumSample: 5 }), ABSOLUTE_MINIMUM_SAMPLE);
+    assert.equal(effectiveMinimumSample({ ...DEFAULT_THRESHOLDS, calibrationMinimumSample: 500 }), 500);
+    assert.equal(effectiveMinimumSample({ ...DEFAULT_THRESHOLDS, calibrationMinimumSample: NaN }), ABSOLUTE_MINIMUM_SAMPLE);
+    assert.ok(ABSOLUTE_MINIMUM_SAMPLE <= DEFAULT_THRESHOLDS.calibrationMinimumSample);
+  });
+
   test('does not mutate DEFAULT_WEIGHTS', () => {
     const snapshot = JSON.stringify(DEFAULT_WEIGHTS);
     proposeWeights(db, { dataset: misweightedDataset(), baseline: BAD_BASELINE, passes: 6, persist: false });
@@ -495,7 +530,9 @@ describe('noiseBandFor', () => {
     assert.ok(noiseBandFor(10) > noiseBandFor(100));
     assert.ok(noiseBandFor(100) > noiseBandFor(1000));
     assert.equal(noiseBandFor(1_000_000), 0.05);
-    assert.equal(noiseBandFor(2), 1);
+    // Spearman spans [-1, 1], so an improvement can be as large as 2. Below
+    // n=3 the band has to cover that whole range or it suppresses nothing.
+    assert.equal(noiseBandFor(2), 2);
   });
 });
 

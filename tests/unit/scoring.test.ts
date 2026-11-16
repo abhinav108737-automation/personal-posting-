@@ -229,3 +229,53 @@ describe('gathering signals from the store', () => {
     assert.ok(JSON.parse(row.components).components.length === 7);
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Interlink limits are SAFETY controls. A limit that cannot be parsed must
+// never read as "no limit" — that is how a per-run cap silently disappears.
+// ═════════════════════════════════════════════════════════════════════════════
+
+test('sanitiseInterlinkLimits rejects junk and falls back to the default', async () => {
+  const { sanitiseInterlinkLimits, DEFAULT_INTERLINK_LIMITS } =
+    await import('../../src/intelligence/weights.js');
+  for (const junk of ['none', '10', NaN, Infinity, -Infinity, null, undefined, {}, [], true]) {
+    const l = sanitiseInterlinkLimits({ maxLinksAddedPerRun: junk }, () => {});
+    assert.equal(l.maxLinksAddedPerRun, DEFAULT_INTERLINK_LIMITS.maxLinksAddedPerRun,
+      `junk=${String(junk)}`);
+  }
+  // Every limit comes back finite whatever the input.
+  const all = sanitiseInterlinkLimits({
+    maxNewLinksPerSourcePage: 'x', maxLinksAddedPerRun: 'x',
+    maxLinksPerDestinationPerWeek: 'x', minRelevanceToPropose: 'x',
+    minParagraphWords: 'x', cooldownHours: 'x',
+  }, () => {});
+  for (const [k, v] of Object.entries(all)) {
+    assert.ok(Number.isFinite(v), `${k} is not finite`);
+  }
+  assert.deepEqual(all, DEFAULT_INTERLINK_LIMITS);
+});
+
+test('sanitiseInterlinkLimits clamps out-of-range values and honours good ones', async () => {
+  const { sanitiseInterlinkLimits } = await import('../../src/intelligence/weights.js');
+  const warnings: string[] = [];
+  const l = sanitiseInterlinkLimits({
+    maxLinksAddedPerRun: 2.7,        // integer-only -> floored
+    cooldownHours: -5,               // below range  -> clamped to 0
+    minRelevanceToPropose: 9,        // above range  -> clamped to 1
+    maxNewLinksPerSourcePage: 4,     // valid        -> kept
+  }, (m) => warnings.push(m));
+  assert.equal(l.maxLinksAddedPerRun, 2);
+  assert.equal(l.cooldownHours, 0);
+  assert.equal(l.minRelevanceToPropose, 1);
+  assert.equal(l.maxNewLinksPerSourcePage, 4);
+  assert.ok(warnings.length >= 2, 'out-of-range overrides must be reported, not silent');
+});
+
+test('a non-object INTERLINK_LIMITS_JSON yields the defaults, never a partial', async () => {
+  const { loadInterlinkLimits, DEFAULT_INTERLINK_LIMITS } =
+    await import('../../src/intelligence/weights.js');
+  for (const raw of ['[]', 'null', '"nope"', '7', '{bad json', '']) {
+    const l = loadInterlinkLimits({ INTERLINK_LIMITS_JSON: raw } as any);
+    assert.deepEqual(l, DEFAULT_INTERLINK_LIMITS, `raw=${raw}`);
+  }
+});
