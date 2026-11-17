@@ -59,5 +59,7 @@ __pycache__/
 backups/
 .pre-restore/
 data/
+# Generated dashboard output — contains report URLs/lead counts, regenerate anytime.
+dashboard/
 # The development sandbox holds dev sessions, logs and accounts.
 dev-sandbox/

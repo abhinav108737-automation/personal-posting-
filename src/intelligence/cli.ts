@@ -45,7 +45,7 @@ import {
   DEFAULT_INTERLINK_LIMITS, loadInterlinkLimits, loadWeights, WEIGHTS_VERSION,
   DEFAULT_THRESHOLDS,
 } from './weights.js';
-import { canApplyInterlinks, editablePlatforms } from './platforms.js';
+import { editablePlatforms } from './platforms.js';
 import { scoreReports, type ScoreResult } from './scoring.js';
 import { analysePlatforms, formatPlatformReport, computePlatformStats, matchPlatformsForReport, formatPlatformMatchReport } from './platformIntelligence.js';
 import { analyseContent, formatContentReport } from './contentIntelligence.js';
@@ -55,7 +55,8 @@ import { collectGsc } from './collectors/gsc.js';
 import { collectGa4 } from './collectors/ga4.js';
 import { collectPipedrive } from './collectors/pipedrive.js';
 import { importManualExportFile, type ManualImportSource } from './collectors/manualImport.js';
-import { maskId, describeSheetConfig, KEN_ENV } from '../config/sheetIds.js';
+import { buildDashboardData, writeDashboard } from './dashboard.js';
+import { describeSheetConfig, KEN_ENV } from '../config/sheetIds.js';
 
 // ── Output seam ──────────────────────────────────────────────────────────────
 
@@ -93,7 +94,7 @@ export interface ParsedArgs {
 /** Flags that consume the following token when not written as --name=value. */
 export const VALUE_FLAGS = new Set([
   'db', 'days', 'limit', 'tab', 'by', 'start', 'end', 'platform', 'site', 'reason',
-  'file', 'source', 'date', 'domain',
+  'file', 'source', 'date', 'domain', 'out', 'inbox',
 ]);
 
 /**
@@ -194,110 +195,24 @@ export function flagDays(a: ParsedArgs, def: number): number {
  * Safe rendering of anything secret-ish. Never returns enough of the value to
  * be useful to someone reading a log, but returns enough to answer "is the
  * thing I pasted the thing that is loaded?".
+ *
+ * maskSecret/maskEmail/CredentialCheck/checkCredentials/formatCredentials
+ * moved to reporting.ts so dashboard.ts can reuse them without importing
+ * this file (which would create a cycle, since this file imports
+ * dashboard.ts for the `dashboard` command). Re-exported below so every
+ * existing import of these from cli.ts keeps working unchanged.
  */
-export function maskSecret(value: string | null | undefined): string {
-  const v = (value ?? '').trim();
-  if (!v) return '(not set)';
-  if (v.length <= 8) return `*** (${v.length} chars)`;
-  return `***${v.slice(-4)} (${v.length} chars)`;
-}
-
-/** An email is not a key, but a service-account address is still not for logs. */
-export function maskEmail(value: string | null | undefined): string {
-  const v = (value ?? '').trim();
-  if (!v) return '(not set)';
-  const at = v.indexOf('@');
-  if (at <= 0) return maskSecret(v);
-  const local = v.slice(0, at);
-  const head = local.slice(0, 2);
-  return `${head}***${v.slice(at)}`;
-}
-
-// ── Credential inventory ─────────────────────────────────────────────────────
-
-export interface CredentialCheck {
-  feature: string;
-  ok: boolean;
-  /** Env vars / files that are absent. Empty when ok. */
-  missing: string[];
-  detail: string;
-}
-
-export const SERVICE_ACCOUNT_FILE = '.accounts/google-service-account.json';
-
-function serviceAccountPresent(env: NodeJS.ProcessEnv, exists: (f: string) => boolean): boolean {
-  if ((env.GOOGLE_SERVICE_ACCOUNT_JSON ?? '').trim()) return true;
-  return exists(SERVICE_ACCOUNT_FILE);
-}
-
-/**
- * Which credentials exist, and therefore which features can possibly work.
- * Pure apart from the injected `exists` probe, so it is directly testable.
- */
-export function checkCredentials(
-  env: NodeJS.ProcessEnv = process.env,
-  exists: (f: string) => boolean = (f) => fs.existsSync(f),
-): CredentialCheck[] {
-  const sa = serviceAccountPresent(env, exists);
-  const saMissing = sa ? [] : [`GOOGLE_SERVICE_ACCOUNT_JSON or ${SERVICE_ACCOUNT_FILE}`];
-
-  const gscSite = (env.GSC_SITE_URL ?? '').trim();
-  const ga4Prop = (env.GA4_PROPERTY_ID ?? '').trim();
-  const pdToken = (env.PIPEDRIVE_API_TOKEN ?? '').trim();
-
-  const out: CredentialCheck[] = [];
-
-  out.push({
-    feature: 'Google Search Console',
-    ok: sa && !!gscSite,
-    missing: [...saMissing, ...(gscSite ? [] : ['GSC_SITE_URL'])],
-    detail: sa && gscSite
-      ? `service account present, site ${gscSite}`
-      : 'cannot collect impressions, clicks or ranking position',
-  });
-
-  out.push({
-    feature: 'Google Analytics 4',
-    ok: sa && !!ga4Prop,
-    missing: [...saMissing, ...(ga4Prop ? [] : ['GA4_PROPERTY_ID'])],
-    detail: sa && ga4Prop
-      ? `service account present, property ${maskId(ga4Prop)}`
-      : 'cannot measure whether ANY platform sends real traffic',
-  });
-
-  out.push({
-    feature: 'Pipedrive (leads)',
-    ok: !!pdToken,
-    missing: pdToken ? [] : ['PIPEDRIVE_API_TOKEN'],
-    detail: pdToken
-      ? `token ${maskSecret(pdToken)}`
-      : 'cannot attribute leads to reports or platforms',
-  });
-
-  out.push({
-    feature: 'Google Sheets (ingest)',
-    ok: sa,
-    missing: saMissing,
-    detail: sa ? 'service account present' : 'cannot read the distribution sheet',
-  });
-
-  return out;
-}
-
-export function formatCredentials(checks: CredentialCheck[]): string {
-  const lines: string[] = [];
-  const w = Math.max(...checks.map(c => c.feature.length));
-  for (const c of checks) {
-    lines.push(`  ${c.ok ? 'OK     ' : 'MISSING'}  ${c.feature.padEnd(w)}  ${c.detail}`);
-    if (!c.ok) lines.push(`${' '.repeat(11 + w + 2)}set: ${c.missing.join(', ')}`);
-  }
-  const broken = checks.filter(c => !c.ok);
-  lines.push('');
-  lines.push(broken.length
-    ? `${broken.length} of ${checks.length} data sources cannot work yet: ${broken.map(b => b.feature).join(', ')}.`
-    : 'All data sources have credentials.');
-  return lines.join('\n');
-}
+export {
+  maskSecret, maskEmail, SERVICE_ACCOUNT_FILE, checkCredentials, formatCredentials,
+  tableCounts, formatTableCounts, knownReportUrls, recentPublishedPosts,
+  proposalsByStatus, formatProposals,
+} from './reporting.js';
+export type { CredentialCheck, ProposalRow } from './reporting.js';
+import {
+  maskSecret, maskEmail, checkCredentials, formatCredentials,
+  tableCounts, formatTableCounts, knownReportUrls, recentPublishedPosts,
+  proposalsByStatus, formatProposals,
+} from './reporting.js';
 
 // ── Flag rendering ───────────────────────────────────────────────────────────
 
@@ -336,54 +251,6 @@ function openHandle(args: ParsedArgs, override?: string): Handle {
 
 function release(h: Handle): void {
   if (h.owned) { try { h.db.close(); } catch { /* already closed */ } }
-}
-
-export function tableCounts(db: DB): Array<{ table: string; rows: number }> {
-  const tables = (db.prepare(
-    `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`,
-  ).all() as any[]).map(r => String(r.name));
-
-  return tables.map(t => {
-    let rows = 0;
-    try {
-      rows = Number((db.prepare(`SELECT COUNT(*) AS n FROM "${t}"`).get() as any)?.n ?? 0);
-    } catch { rows = -1; }
-    return { table: t, rows };
-  });
-}
-
-export function formatTableCounts(counts: Array<{ table: string; rows: number }>): string {
-  if (!counts.length) return '  (no tables — run "migrate")';
-  const w = Math.max(...counts.map(c => c.table.length));
-  const total = counts.reduce((a, c) => a + Math.max(0, c.rows), 0);
-  const lines = counts.map(c => `  ${c.table.padEnd(w)}  ${String(c.rows).padStart(7)}`);
-  if (total === 0) {
-    lines.push('');
-    lines.push('  Every table is empty — no data yet. Run "ingest" then "collect".');
-  }
-  return lines.join('\n');
-}
-
-/** Report URLs we know about, best-known first. Empty on an empty database. */
-export function knownReportUrls(db: DB, limit = 50): string[] {
-  const rows = db.prepare(
-    `SELECT report_url, MAX(posted_at) AS last_posted, COUNT(*) AS n
-       FROM published_posts
-      WHERE report_url IS NOT NULL AND report_url <> ''
-      GROUP BY report_url
-      ORDER BY last_posted DESC
-      LIMIT ?`,
-  ).all(limit) as any[];
-  return rows.map(r => String(r.report_url));
-}
-
-export function recentPublishedPosts(db: DB, limit = 25): Array<{ url: string; platform: string | null }> {
-  const rows = db.prepare(
-    `SELECT published_url, platform FROM published_posts
-      WHERE published_url IS NOT NULL AND published_url <> ''
-      ORDER BY posted_at DESC LIMIT ?`,
-  ).all(limit) as any[];
-  return rows.map(r => ({ url: String(r.published_url), platform: r.platform ?? null }));
 }
 
 // ── Banners ──────────────────────────────────────────────────────────────────
@@ -812,47 +679,6 @@ async function cmdContent(args: ParsedArgs, out: Out): Promise<number> {
 
 // ── Interlinking ─────────────────────────────────────────────────────────────
 
-export interface ProposalRow {
-  id: number;
-  source_url: string;
-  source_platform: string | null;
-  destination_url: string;
-  anchor_text: string;
-  relevance: number | null;
-  rationale: string | null;
-  status: string;
-  created_at: string;
-  decided_by: string | null;
-}
-
-export function proposalsByStatus(db: DB, status: string, limit = 50): ProposalRow[] {
-  return db.prepare(
-    `SELECT id, source_url, source_platform, destination_url, anchor_text,
-            relevance, rationale, status, created_at, decided_by
-       FROM interlink_proposals WHERE status = ?
-      ORDER BY relevance DESC, id ASC LIMIT ?`,
-  ).all(status, limit) as any[];
-}
-
-export function formatProposals(rows: ProposalRow[], emptyNote: string): string {
-  if (!rows.length) return emptyNote;
-  const lines: string[] = [];
-  for (const r of rows) {
-    const rel = r.relevance === null || r.relevance === undefined ? '—' : r.relevance.toFixed(2);
-    lines.push(`  #${r.id}  rel ${rel}  [${r.source_platform ?? 'unknown platform'}]`);
-    lines.push(`      from  ${r.source_url}`);
-    lines.push(`      to    ${r.destination_url}`);
-    lines.push(`      anchor "${r.anchor_text}"`);
-    if (r.rationale) lines.push(`      why   ${r.rationale}`);
-    if (!canApplyInterlinks(r.source_platform ?? '')) {
-      lines.push('      NOTE  this platform cannot be edited after publishing — approval here changes nothing.');
-    }
-  }
-  lines.push('');
-  lines.push(`${rows.length} proposal(s).`);
-  return lines.join('\n');
-}
-
 async function cmdPropose(args: ParsedArgs, out: Out): Promise<number> {
   const h = openHandle(args);
   try {
@@ -1116,6 +942,41 @@ async function cmdExport(args: ParsedArgs, out: Out): Promise<number> {
   }
 }
 
+/**
+ * dashboard — the same facts every other command prints, rendered as one
+ * static HTML page instead of terminal text. Built for someone who wants to
+ * glance at a browser tab rather than run commands: no credentials are read
+ * beyond what `status` already reads, nothing here can approve or apply
+ * anything, and it refreshes by being re-run (by hand, or on a schedule —
+ * see docs/MANAGER-DASHBOARD.md).
+ */
+async function cmdDashboard(args: ParsedArgs, out: Out, env: NodeJS.ProcessEnv): Promise<number> {
+  const h = openHandle(args);
+  try {
+    out.log(banner('DASHBOARD — building a static page from local data', [
+      'Reads the local database only. No published content is touched.',
+      '',
+    ]));
+    const outFile = path.resolve(flagStr(args, 'out') ?? path.join('dashboard', 'latest.html'));
+    const inboxDir = flagStr(args, 'inbox') ? path.resolve(flagStr(args, 'inbox')!) : undefined;
+    const data = buildDashboardData({
+      db: h.db,
+      windowDays: flagDays(args, 90),
+      reportLimit: flagLimit(args, 25),
+      ...(inboxDir ? { inboxDir } : {}),
+      ...(flagStr(args, 'domain') ? { domain: flagStr(args, 'domain') } : {}),
+      env,
+    });
+    writeDashboard(data, outFile);
+    out.log(`Wrote ${outFile}`);
+    out.log(`Inbox: ${data.inbox.imported} imported, ${data.inbox.skipped} skipped.`);
+    out.log('Open that file in a browser to view it.');
+    return 0;
+  } finally {
+    release(h);
+  }
+}
+
 async function cmdReport(args: ParsedArgs, out: Out, env: NodeJS.ProcessEnv): Promise<number> {
   await cmdStatus(args, out, env);
   out.log('');
@@ -1152,6 +1013,7 @@ export const COMMANDS = [
   ['apply', 'Apply approved proposals. DRY RUN unless --apply is given'],
   ['calibrate', 'Compare predictions against outcomes'],
   ['report', 'Everything known, in one readable page'],
+  ['dashboard', 'Everything known, as a static HTML page (--out <path>)'],
   ['help', 'This text'],
 ] as const;
 
@@ -1173,6 +1035,8 @@ export function formatHelp(): string {
     '  --by <name>     Who is approving/rejecting',
     '  --apply         Make real changes. Without it, "apply" is a dry run',
     '  --force         Run ingest even when FEATURE_INTELLIGENCE is off',
+    '  --out <path>    Where "dashboard" writes its HTML (default: dashboard/latest.html)',
+    '  --inbox <path>  Folder "dashboard" scans for dropped GA4/GSC CSVs',
     '',
     'Every feature is off by default. "status" tells you what is missing.',
   ].join('\n');
@@ -1219,6 +1083,7 @@ export async function runCli(argv: string[], options: RunOptions = {}): Promise<
       case 'calibrate': return await cmdCalibrate(args, out);
       case 'export': return await cmdExport(args, out);
       case 'report': return await cmdReport(args, out, env);
+      case 'dashboard': return await cmdDashboard(args, out, env);
       case 'help': out.log(formatHelp()); return 0;
       default:
         out.error(`Unknown command: ${args.command}`);
