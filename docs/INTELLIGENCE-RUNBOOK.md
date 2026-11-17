@@ -137,6 +137,34 @@ automatic refresh on this path since it depends on you running the export.
 
 ---
 
+## Sizing the indexation check budget
+
+**The problem:** distribution covers roughly 43,000 URLs in total, with
+~13,000–17,000 new posts going out per month. Checking "is this live on
+Google" for every one of those costs one SERP provider call per URL. Free-tier
+SERP keys do not stretch that far — asking "is everything indexed, always" is
+not a software problem, it is a budget problem, and `index-check` is built to
+be honest about that rather than pretend otherwise.
+
+**The fix:** `index-check` never tries to check everything in one pass. Each
+run spends a fixed daily budget (`--limit`, or env `INDEX_CHECK_DAILY_BUDGET`,
+default 100) split two ways:
+- **70%** goes to the most recently published posts — so this month's work
+  gets checked first.
+- **30%** goes to whichever known URLs have gone longest without a check
+  (never-checked URLs first) — so the 43k backlog keeps rotating through
+  instead of the same unlucky tail never being reached.
+
+Set `INDEX_CHECK_DAILY_BUDGET` to roughly your total free-tier monthly
+SERP+Zenserp+Serpstack quota, divided by 30. If that number is small, the
+backlog simply rotates more slowly — a URL not checked this week will be
+checked a few weeks later, not silently dropped. Nothing here ever guesses a
+result to make the numbers look better: a URL outside this run's budget just
+doesn't get a fresh answer yet, same as any URL the providers themselves
+refuse to answer (reported "unknown", not a fabricated verdict).
+
+---
+
 ## Commands
 
 | Command | What it does |

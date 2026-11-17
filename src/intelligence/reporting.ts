@@ -12,6 +12,7 @@ import fs from 'fs';
 import type { DB } from './db.js';
 import { maskId } from '../config/sheetIds.js';
 import { canApplyInterlinks } from './platforms.js';
+import { normaliseUrl } from './indexation.js';
 
 // ── Secret masking ────────────────────────────────────────────────────────────
 
@@ -172,6 +173,70 @@ export function recentPublishedPosts(db: DB, limit = 25): Array<{ url: string; p
       ORDER BY posted_at DESC LIMIT ?`,
   ).all(limit) as any[];
   return rows.map(r => ({ url: String(r.published_url), platform: r.platform ?? null }));
+}
+
+/**
+ * Budgeted URL selection for indexation checks, built for the gap between a
+ * large, slow-growing backlog (tens of thousands of URLs) and a small,
+ * free-tier SERP call budget (tens to low hundreds per day). Checking every
+ * URL on every run is not an option at that ratio, so two priorities compete
+ * for the same fixed budget instead of one list getting checked in order:
+ *
+ *   - `newBudget` slots go to the most recently published posts first —
+ *     "did this month's work land" matters more than re-confirming an old one.
+ *   - `backlogBudget` slots go to whatever has gone LONGEST without a check
+ *     (including "never checked" first) — so the 43k-URL backlog keeps
+ *     rotating instead of the same unlucky tail never being reached.
+ *
+ * A post can appear in both halves if it is both recent and never checked;
+ * checkIndexation()'s own recency skip (maxAgeDays) is the backstop that
+ * keeps a budget slot from being wasted on a URL checked earlier today.
+ */
+export function selectUrlsForIndexCheck(
+  db: DB,
+  opts: { newBudget: number; backlogBudget: number; newWindowDays?: number },
+): Array<{ url: string; platform: string | null }> {
+  const newWindowDays = opts.newWindowDays ?? 14;
+  const newBudget = Math.max(0, Math.trunc(opts.newBudget));
+  const backlogBudget = Math.max(0, Math.trunc(opts.backlogBudget));
+
+  const fresh = newBudget > 0 ? (db.prepare(
+    `SELECT published_url, platform FROM published_posts
+      WHERE published_url IS NOT NULL AND published_url <> ''
+        AND posted_at >= datetime('now', ?)
+      ORDER BY posted_at DESC LIMIT ?`,
+  ).all(`-${newWindowDays} days`, newBudget) as any[]) : [];
+
+  const seen = new Set(fresh.map(r => String(r.published_url)));
+
+  let backlog: Array<{ published_url: string; platform: string | null }> = [];
+  if (backlogBudget > 0) {
+    // indexation_checks stores the NORMALISED url (see recordCheck in
+    // indexation.ts); published_posts keeps the raw one. A plain SQL join on
+    // the raw string would miss almost every match (scheme/www/trailing-slash
+    // differences), silently making every backlog URL look "never checked"
+    // and defeating the rotation. Build the "last checked" map in JS instead,
+    // keyed by the same normaliseUrl() the recorder uses.
+    const lastCheckedByNormalised = new Map<string, string>();
+    for (const row of db.prepare(
+      `SELECT url, MAX(checked_at) AS last_checked FROM indexation_checks GROUP BY url`,
+    ).all() as Array<{ url: string; last_checked: string }>) {
+      lastCheckedByNormalised.set(row.url, row.last_checked);
+    }
+
+    const candidates = db.prepare(
+      `SELECT published_url, platform FROM published_posts
+        WHERE published_url IS NOT NULL AND published_url <> ''`,
+    ).all() as Array<{ published_url: string; platform: string | null }>;
+
+    backlog = candidates
+      .filter(r => !seen.has(r.published_url))
+      .map(r => ({ ...r, lastChecked: lastCheckedByNormalised.get(normaliseUrl(r.published_url)) ?? '' }))
+      .sort((a, b) => (a.lastChecked < b.lastChecked ? -1 : a.lastChecked > b.lastChecked ? 1 : 0))
+      .slice(0, backlogBudget);
+  }
+
+  return [...fresh, ...backlog].map(r => ({ url: String(r.published_url), platform: r.platform ?? null }));
 }
 
 // ── Interlinking proposals ───────────────────────────────────────────────────

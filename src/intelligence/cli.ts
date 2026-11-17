@@ -205,13 +205,13 @@ export function flagDays(a: ParsedArgs, def: number): number {
 export {
   maskSecret, maskEmail, SERVICE_ACCOUNT_FILE, checkCredentials, formatCredentials,
   tableCounts, formatTableCounts, knownReportUrls, recentPublishedPosts,
-  proposalsByStatus, formatProposals,
+  selectUrlsForIndexCheck, proposalsByStatus, formatProposals,
 } from './reporting.js';
 export type { CredentialCheck, ProposalRow } from './reporting.js';
 import {
   maskSecret, maskEmail, checkCredentials, formatCredentials,
-  tableCounts, formatTableCounts, knownReportUrls, recentPublishedPosts,
-  proposalsByStatus, formatProposals,
+  tableCounts, formatTableCounts, knownReportUrls,
+  selectUrlsForIndexCheck, proposalsByStatus, formatProposals,
 } from './reporting.js';
 
 // ── Flag rendering ───────────────────────────────────────────────────────────
@@ -550,14 +550,25 @@ async function cmdIndexCheck(args: ParsedArgs, out: Out): Promise<number> {
       return 0;
     }
 
-    const limit = flagLimit(args, 25);
-    const posts = recentPublishedPosts(h.db, limit);
+    // Daily call budget. 43k+ URLs and ~free-tier SERP capacity cannot both
+    // be satisfied by "check everything" — see docs/INTELLIGENCE-RUNBOOK.md,
+    // "Sizing the indexation check budget". Default of 100 is a placeholder;
+    // set INDEX_CHECK_DAILY_BUDGET to whatever the provisioned keys can
+    // actually sustain per day.
+    const envBudget = Number(process.env.INDEX_CHECK_DAILY_BUDGET);
+    const defaultBudget = Number.isFinite(envBudget) && envBudget > 0 ? envBudget : 100;
+    const budget = flagLimit(args, defaultBudget);
+    const newBudget = Math.ceil(budget * 0.7);
+    const backlogBudget = budget - newBudget;
+
+    const posts = selectUrlsForIndexCheck(h.db, { newBudget, backlogBudget });
     if (!posts.length) {
       out.log('No published posts in the database yet — run "ingest" first.');
       return 0;
     }
 
-    const s = await checkIndexation({ db: h.db, urls: posts, limit });
+    out.log(`Budget ${budget}/run (${newBudget} newest posts, ${backlogBudget} oldest-checked backlog).`);
+    const s = await checkIndexation({ db: h.db, urls: posts, limit: budget });
     out.log(`Considered ${s.considered}, skipped ${s.skippedRecent} as recently checked, checked ${s.checked}.`);
     out.log(`  indexed ${s.indexed}   not indexed ${s.notIndexed}   unknown ${s.unknown}`);
     if (s.unknown) out.log('  "unknown" usually means the provider throttled us, not that the page is missing.');
@@ -1030,7 +1041,10 @@ export function formatHelp(): string {
     'Options:',
     '  --db <path>     Use a specific database file (default: data/intelligence.db)',
     '  --days <n>      Window size for collection / scoring',
-    '  --limit <n>     Maximum rows to process or print',
+    '  --limit <n>     Maximum rows to process or print; for "index-check" this is',
+    '                  the daily SERP call budget (default 100, or env',
+    '                  INDEX_CHECK_DAILY_BUDGET): 70% newest posts, 30% oldest-',
+    '                  checked backlog rotation',
     '  --tab <names>   Comma-separated sheet tabs for "ingest"',
     '  --by <name>     Who is approving/rejecting',
     '  --apply         Make real changes. Without it, "apply" is a dry run',
