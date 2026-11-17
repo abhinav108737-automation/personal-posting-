@@ -68,6 +68,75 @@ See `docs/ACCESS-REQUIRED.md` for exactly who to ask for each credential.
 
 ---
 
+## Getting GA4/GSC numbers in without handing out your login
+
+Your GA4 and Search Console access stays with you — it is not given to the
+service account, to Pranav, or to anyone else. `npm run intel collect` (the
+row above) is the automated path and needs that access; if you're not
+granting it, use this path instead.
+
+**Why not automate the export with a browser bot (Playwright)?** It wouldn't
+actually help. Google enforces the same daily quota on its website that it
+enforces on the API — a bot clicking through the GA4/GSC UI runs into the
+exact same ceiling, just slower, and it would need your Google login saved
+on whichever machine runs it, which is the thing we're avoiding in the first
+place. Exporting the CSV yourself, in your own browser, under your own
+login, has none of that risk. That's the path below.
+
+### Step 1 — export from GA4
+
+1. Open your GA4 property → **Reports → Engagement → Pages and screens**
+   (or **Landing page**, if you want sessions attributed to the first page a
+   visitor landed on rather than every page they viewed).
+2. Set the date range you want (e.g. "last 7 days").
+3. Click the **export icon** (top right of the report) → **Download CSV**.
+
+### Step 2 — export from Search Console
+
+1. Open **Search Console → Performance → Pages** tab (not the default
+   Queries tab).
+2. Set the date range.
+3. Click **Export → CSV**.
+
+### Step 3 — load it into this project
+
+```bash
+npm run intel import-performance --file "C:\path\to\export.csv" --source ga4 --date 2026-11-17
+npm run intel import-performance --file "C:\path\to\export.csv" --source gsc --date 2026-11-17
+```
+
+- `--source` is `ga4` or `gsc` — whichever export this file is.
+- `--date` is the date the export represents (today, or the last day of the
+  range you picked). GA4/GSC exports give one number per URL for the whole
+  range, not one row per day, so this date is a label for the whole file.
+  Re-running the same file with the same date updates those rows instead of
+  creating duplicates — safe to re-run.
+- The file is read once, locally. Nothing is uploaded anywhere, no network
+  call is made, no credential is read.
+
+The command tells you which columns it recognised and how many rows it
+wrote, e.g.:
+
+```
+Matched columns: {"url":"Page path and screen class","sessions":"Sessions"}
+Parsed 86 row(s), skipped 2, wrote 84.
+```
+
+If it says `No recognisable URL/page column`, you likely exported the wrong
+tab (e.g. a Queries report instead of a Pages report) — the file needs one
+row per URL.
+
+### What this plugs into
+
+This writes to the exact same table the automated GA4/GSC collectors would
+write to. `npm run intel platforms`, `npm run intel score`, and the
+interlink proposals all read it identically either way — they cannot tell a
+manual export from a live API pull. Repeat the export/import weekly (or
+whatever cadence suits you) to keep the numbers current; there's no
+automatic refresh on this path since it depends on you running the export.
+
+---
+
 ## Commands
 
 | Command | What it does |
@@ -75,7 +144,8 @@ See `docs/ACCESS-REQUIRED.md` for exactly who to ask for each credential.
 | `npm run intel status` | What is on, what data exists, what is missing |
 | `npm run intel migrate` | Create or update the database |
 | `npm run intel ingest` | Read the sheet into the local database |
-| `npm run intel collect` | Pull GSC / GA4 / Pipedrive data |
+| `npm run intel collect` | Pull GSC / GA4 / Pipedrive data (needs service-account access) |
+| `npm run intel import-performance` | Load a GA4/GSC CSV you exported yourself — no credentials needed |
 | `npm run intel index-check` | Check whether published posts are in Google |
 | `npm run intel platforms` | **Which platforms actually work** |
 | `npm run intel content` | Which content characteristics correlate with results |
