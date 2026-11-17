@@ -47,7 +47,7 @@ import {
 } from './weights.js';
 import { canApplyInterlinks, editablePlatforms } from './platforms.js';
 import { scoreReports, type ScoreResult } from './scoring.js';
-import { analysePlatforms, formatPlatformReport } from './platformIntelligence.js';
+import { analysePlatforms, formatPlatformReport, computePlatformStats, matchPlatformsForReport, formatPlatformMatchReport } from './platformIntelligence.js';
 import { analyseContent, formatContentReport } from './contentIntelligence.js';
 import { checkIndexation } from './indexation.js';
 import { ingestFromSheet, mappingCoverage } from './urlMapping.js';
@@ -762,6 +762,38 @@ async function cmdPlatforms(args: ParsedArgs, out: Out): Promise<number> {
   }
 }
 
+/**
+ * match <reportUrl> — "which platform should THIS report go on?"
+ *
+ * The narrower question platforms/cmdPlatforms doesn't answer: that command
+ * says whether a platform is worth posting to AT ALL; this ranks every
+ * platform for ONE specific report, direct evidence first, falling back to
+ * the platform's general track record. Feeds scoring.ts's platformSuitability
+ * signal; this command is the human-readable form of the same computation.
+ */
+async function cmdMatch(args: ParsedArgs, out: Out): Promise<number> {
+  const h = openHandle(args);
+  try {
+    out.log(banner('PLATFORM MATCH — which platform this report should go on'));
+    out.log('');
+    if (!enabled('PLATFORM_INTELLIGENCE')) {
+      out.log('FEATURE_PLATFORM_INTELLIGENCE (or FEATURE_INTELLIGENCE) is off — nothing computed.');
+      return 0;
+    }
+    const reportUrl = args.positionals[0];
+    if (!reportUrl) {
+      out.error('A report URL is required: intel match <reportUrl>');
+      return 1;
+    }
+    const stats = computePlatformStats({ db: h.db, windowDays: flagDays(args, 90) });
+    const result = matchPlatformsForReport(h.db, reportUrl, stats);
+    out.log(formatPlatformMatchReport(result));
+    return 0;
+  } finally {
+    release(h);
+  }
+}
+
 async function cmdContent(args: ParsedArgs, out: Out): Promise<number> {
   const h = openHandle(args);
   try {
@@ -1111,6 +1143,7 @@ export const COMMANDS = [
   ['index-check', 'Check whether recent published posts are visible in search'],
   ['score', 'Score report URLs and explain every score'],
   ['platforms', 'Which of the platforms actually work'],
+  ['match <reportUrl>', 'Which platform THIS report should go on, ranked, direct evidence first'],
   ['content', 'Which content characteristics correlate with outcomes'],
   ['propose', 'Generate interlink proposals (local only, never published)'],
   ['queue', 'List proposals awaiting human approval'],
@@ -1176,6 +1209,7 @@ export async function runCli(argv: string[], options: RunOptions = {}): Promise<
       case 'index': return await cmdIndexCheck(args, out);
       case 'score': return await cmdScore(args, out);
       case 'platforms': return await cmdPlatforms(args, out);
+      case 'match': return await cmdMatch(args, out);
       case 'content': return await cmdContent(args, out);
       case 'propose': return await cmdPropose(args, out);
       case 'queue': return await cmdQueue(args, out);

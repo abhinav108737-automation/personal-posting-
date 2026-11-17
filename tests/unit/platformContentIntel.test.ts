@@ -9,7 +9,7 @@ import path from 'path';
 import { openDb, nowIso } from '../../src/intelligence/db.js';
 import {
   indexationRate, computePlatformStats, recommend, persistPlatformStats,
-  formatPlatformReport,
+  formatPlatformReport, matchPlatformsForReport, formatPlatformMatchReport,
 } from '../../src/intelligence/platformIntelligence.js';
 import {
   stripHtml, countWords, fleschReadingEase, extractFeatures, pearson,
@@ -284,5 +284,146 @@ describe('URL normalisation across modules (regression)', () => {
     const s = gatherSignals({ db, reportUrl });
     assert.notEqual(s.indexation, null, 'indexation must be found despite url form');
     assert.ok((s.indexation as number) > 0.9);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// matchPlatformsForReport — "which platform should THIS report go on?" This
+// is the per-report question; computePlatformStats/recommend only answer the
+// coarser "is this platform worth posting to at all".
+// ═════════════════════════════════════════════════════════════════════════════
+describe('matchPlatformsForReport', () => {
+  const REPORT = 'https://www.kenresearch.com/report-match-test';
+
+  function addPostFor(reportUrl: string, platform: string, publishedUrl: string, postedAt = '2026-11-01T00:00:00Z') {
+    db.prepare(`INSERT INTO published_posts (report_url, platform, published_url, posted_at, created_at)
+      VALUES (?,?,?,?,?)`).run(reportUrl, platform, publishedUrl, postedAt, nowIso());
+  }
+  function addPerf(url: string, sessions: number) {
+    db.prepare(`INSERT INTO url_performance (url, source, metric_date, metric_scope, sessions, collected_at)
+      VALUES (?,?,?,?,?,?)`).run(url, 'ga4', '2026-11-10', 'url', sessions, nowIso());
+  }
+  function addLeadFor(reportUrl: string, utmSource: string, n = 1) {
+    for (let i = 0; i < n; i++) {
+      db.prepare(`INSERT INTO leads (external_id, source_system, created_at, report_url, utm_source, collected_at)
+        VALUES (?,?,?,?,?,?)`).run(`${utmSource}-${i}-${Math.random()}`, 'pipedrive', '2026-11-10T00:00:00Z', reportUrl, utmSource, nowIso());
+    }
+  }
+  // Give a platform a real general track record so it clears
+  // platformMinimumSample (20). computePlatformStats reads PLATFORM-WIDE
+  // traffic from a single 'utm_source'-scoped row (the GA4 collector's own
+  // storage convention — see collectors/ga4.ts), NOT from the per-URL 'url'
+  // scope that addPerf below writes for direct, post-specific evidence.
+  function givePlatformGeneralHistory(platform: string, utmSource: string, sessionsPerPost: number) {
+    const postCount = 25;
+    for (let i = 0; i < postCount; i++) {
+      const url = `https://${platform.toLowerCase()}.example/${i}`;
+      addPostFor('https://www.kenresearch.com/other-report', platform, url, '2026-10-01T00:00:00Z');
+    }
+    db.prepare(`INSERT INTO url_performance (url, source, metric_date, metric_scope, dimension_value, sessions, collected_at)
+      VALUES (?,?,?,?,?,?,?)`)
+      .run('(property)', 'ga4', '2026-11-10', 'utm_source', `${utmSource}|automation`, sessionsPerPost * postCount, nowIso());
+  }
+
+  test('with no data anywhere, every platform is insufficient-data and suitability is null', () => {
+    const stats = computePlatformStats({ db, windowDays: 365, endDate: '2026-11-16' });
+    const result = matchPlatformsForReport(db, REPORT, stats);
+    assert.equal(result.suitability, null);
+    assert.equal(result.bestUntried, null);
+    assert.ok(result.ranked.every(r => r.fit === null && r.evidence === 'none'));
+    assert.equal(result.coverage, 0);
+  });
+
+  test('a platform with a proven general track record, untried for this report, becomes the best recommendation', () => {
+    givePlatformGeneralHistory('HackMD', 'hackmd', 8);
+    const stats = computePlatformStats({ db, windowDays: 365, endDate: '2026-11-16' });
+    const result = matchPlatformsForReport(db, REPORT, stats);
+
+    assert.ok(result.bestUntried !== null);
+    assert.equal(result.bestUntried!.platform, 'HackMD');
+    assert.equal(result.bestUntried!.tried, false);
+    assert.equal(result.bestUntried!.evidence, 'general');
+    assert.ok(result.suitability !== null && result.suitability > 0);
+  });
+
+  test('DIRECT evidence for this report beats the platform general average', () => {
+    // HackMD's general record is modest...
+    givePlatformGeneralHistory('HackMD', 'hackmd', 2);
+    // ...but THIS report's own HackMD post did exceptionally well.
+    const ownUrl = 'https://hackmd.io/this-report-post';
+    addPostFor(REPORT, 'HackMD', ownUrl, '2026-11-05T00:00:00Z');
+    addPerf(ownUrl, 500);
+    addLeadFor(REPORT, 'hackmd', 3);
+
+    const stats = computePlatformStats({ db, windowDays: 365, endDate: '2026-11-16' });
+    const result = matchPlatformsForReport(db, REPORT, stats);
+    const hackmd = result.ranked.find(r => r.platform === 'HackMD')!;
+
+    assert.equal(hackmd.tried, true);
+    assert.equal(hackmd.evidence, 'direct');
+    assert.equal(hackmd.sessionsPerPost, 500);
+    assert.equal(hackmd.leadsPerPost, 3);
+    // Already tried, so it can never be the "bestUntried" recommendation,
+    // however well it did.
+    assert.notEqual(result.bestUntried?.platform, 'HackMD');
+  });
+
+  test('a platform already tried for this report, with no own data yet, falls back to its general record and is never recommended as "untried"', () => {
+    givePlatformGeneralHistory('Mataroa', 'mataroa', 4);
+    addPostFor(REPORT, 'Mataroa', 'https://keninsight.mataroa.blog/this-one', '2026-11-05T00:00:00Z');
+    // No url_performance / leads row for this report's own Mataroa post.
+
+    const stats = computePlatformStats({ db, windowDays: 365, endDate: '2026-11-16' });
+    const result = matchPlatformsForReport(db, REPORT, stats);
+    const mataroa = result.ranked.find(r => r.platform === 'Mataroa')!;
+
+    assert.equal(mataroa.tried, true);
+    assert.equal(mataroa.evidence, 'general');
+    assert.notEqual(result.bestUntried?.platform, 'Mataroa', 'tried platforms are never the "untried" recommendation');
+  });
+
+  test('ranking is deterministic: higher fit first, ties broken by platform name', () => {
+    givePlatformGeneralHistory('HackMD', 'hackmd', 10);
+    givePlatformGeneralHistory('Mataroa', 'mataroa', 3);
+    const stats = computePlatformStats({ db, windowDays: 365, endDate: '2026-11-16' });
+    const result = matchPlatformsForReport(db, REPORT, stats);
+
+    const withFit = result.ranked.filter(r => r.fit !== null);
+    for (let i = 1; i < withFit.length; i++) {
+      assert.ok(withFit[i - 1]!.fit! >= withFit[i]!.fit!, 'must be sorted best-first');
+    }
+    const hackmdIdx = result.ranked.findIndex(r => r.platform === 'HackMD');
+    const mataroaIdx = result.ranked.findIndex(r => r.platform === 'Mataroa');
+    assert.ok(hackmdIdx < mataroaIdx, 'the platform with more sessions/post must rank first');
+  });
+
+  test('formatPlatformMatchReport never crashes on an empty/no-data result and says so plainly', () => {
+    const stats = computePlatformStats({ db, windowDays: 365, endDate: '2026-11-16' });
+    const result = matchPlatformsForReport(db, REPORT, stats);
+    const text = formatPlatformMatchReport(result);
+    assert.ok(text.includes('No untried platform'));
+    assert.ok(text.includes('Advisory only'));
+  });
+
+  test('matchPlatformsForReport result wires correctly into scoring.ts platformSuitability when the flag is on', async () => {
+    const { gatherSignals } = await import('../../src/intelligence/scoring.js');
+    givePlatformGeneralHistory('HackMD', 'hackmd', 9);
+
+    const before = process.env.FEATURE_PLATFORM_INTELLIGENCE;
+    delete process.env.FEATURE_PLATFORM_INTELLIGENCE;
+    try {
+      assert.equal(gatherSignals({ db, reportUrl: REPORT }).platformSuitability, null,
+        'off by default: flag unset means this signal stays missing');
+
+      process.env.FEATURE_PLATFORM_INTELLIGENCE = '1';
+      process.env.FEATURE_INTELLIGENCE = '1';
+      const s = gatherSignals({ db, reportUrl: REPORT });
+      assert.notEqual(s.platformSuitability, null, 'flag on + real data: the signal must actually fill in');
+      assert.ok((s.platformSuitability as number) > 0 && (s.platformSuitability as number) <= 1);
+    } finally {
+      if (before === undefined) delete process.env.FEATURE_PLATFORM_INTELLIGENCE;
+      else process.env.FEATURE_PLATFORM_INTELLIGENCE = before;
+      delete process.env.FEATURE_INTELLIGENCE;
+    }
   });
 });

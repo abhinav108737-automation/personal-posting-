@@ -25,6 +25,7 @@ import {
 } from './weights.js';
 import { FLAGS, enabled } from './flags.js';
 import { normaliseUrl } from './indexation.js';
+import { computePlatformStats, matchPlatformsForReport, type PlatformWindowStats } from './platformIntelligence.js';
 
 /** A signal is a number in 0..1, or null meaning "not known". */
 export type Signal = number | null;
@@ -190,6 +191,13 @@ export interface GatherOptions {
   impressionCeiling?: number;
   sessionCeiling?: number;
   leadCeiling?: number;
+  /**
+   * Precomputed PlatformWindowStats, so scoring a batch of reports doesn't
+   * recompute them (a full published_posts/url_performance/leads scan) once
+   * per report. Only used when FEATURE_PLATFORM_INTELLIGENCE is on; computed
+   * lazily here if omitted, for standalone/test callers.
+   */
+  platformStats?: PlatformWindowStats[];
 }
 
 export function gatherSignals(opts: GatherOptions): SignalSet {
@@ -224,6 +232,17 @@ export function gatherSignals(opts: GatherOptions): SignalSet {
     `SELECT MAX(posted_at) AS last FROM published_posts WHERE report_url = ?`
   ).get(reportUrl) as any;
 
+  // platformSuitability: "given THIS report, is there a platform it should
+  // go to that it hasn't been tried on yet, with a proven track record?"
+  // Gated on PLATFORM_INTELLIGENCE independently of OPPORTUNITY_SCORING, so
+  // turning scoring on alone doesn't silently pull in a second subsystem.
+  // Insufficient data stays null (missing, excluded+renormalised) — never 0.
+  let platformSuitability: Signal = null;
+  if (enabled('PLATFORM_INTELLIGENCE')) {
+    const stats = opts.platformStats ?? computePlatformStats({ db, windowDays });
+    platformSuitability = matchPlatformsForReport(db, reportUrl, stats).suitability;
+  }
+
   const impressions = Number(gsc?.impressions ?? 0);
   const sessions = Number(ga4?.sessions ?? 0);
   const leads = Number(leadRow?.leads ?? 0);
@@ -246,7 +265,7 @@ export function gatherSignals(opts: GatherOptions): SignalSet {
     // Leads: zero leads IS a measurement once any lead data exists at all.
     historicalLeads: hasAnyLeadData(db) ? logNormalise(leads, opts.leadCeiling ?? 50) : null,
     geographic: null,
-    platformSuitability: null,
+    platformSuitability,
     daysSinceLastPromotion: daysSince,
   };
 }
@@ -278,8 +297,14 @@ export function scoreReports(db: DB, reportUrls: string[], opts: { windowDays?: 
   if (!enabled('OPPORTUNITY_SCORING')) return [];
 
   const weights = loadWeights();
+  // Computed ONCE for the whole batch (not per report) — computePlatformStats
+  // scans published_posts/url_performance/leads for every registered
+  // platform, so doing it per-report would multiply that scan by report count.
+  const platformStats = enabled('PLATFORM_INTELLIGENCE')
+    ? computePlatformStats({ db, windowDays: opts.windowDays })
+    : undefined;
   const results = reportUrls.map(url =>
-    computeScore(url, gatherSignals({ db, reportUrl: url, windowDays: opts.windowDays }), weights),
+    computeScore(url, gatherSignals({ db, reportUrl: url, windowDays: opts.windowDays, platformStats }), weights),
   );
 
   const shadow = FLAGS.SHADOW_MODE || !FLAGS.SCORING_INFLUENCES_ORDER;

@@ -248,6 +248,170 @@ export function recommend(
   return { platform: s.platform, stats: s, recommendation: 'keep', reasons, confidence: s.dataCoverage >= 0.75 ? 'high' : 'medium' };
 }
 
+// ── Per-report platform matching ───────────────────────────────────────────
+//
+// computePlatformStats/recommend answer "is this platform worth posting to
+// at all". This answers the narrower, originally-planned question: "given
+// THIS report, which of our platforms should it go on" — scoring.ts has a
+// platformSuitability signal slot that has never been filled; this is what
+// fills it.
+//
+// Duplicated tiny helpers (not imported from scoring.ts) to avoid a circular
+// import: scoring.ts calls matchPlatformsForReport, so this module must not
+// import scoring.ts.
+function clamp01(n: number): number {
+  return Math.max(0, Math.min(1, n));
+}
+function logNormalise(value: number, ceiling: number): number {
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  if (ceiling <= 1) return clamp01(value);
+  return clamp01(Math.log1p(value) / Math.log1p(ceiling));
+}
+
+export interface PlatformFit {
+  platform: string;
+  /** Has THIS report already been posted to this platform? */
+  tried: boolean;
+  /**
+   * 'direct'  — this report's OWN post on this platform has performance data.
+   * 'general' — no data for this report specifically; falling back to the
+   *             platform's overall track record (computePlatformStats).
+   * 'none'    — neither exists. fit is null, never a guessed number.
+   */
+  evidence: 'direct' | 'general' | 'none';
+  sessionsPerPost: number | null;
+  leadsPerPost: number | null;
+  /** 0..1, log-scaled. null means "not enough data to judge", never zero. */
+  fit: number | null;
+  reason: string;
+}
+
+export interface PlatformMatchResult {
+  reportUrl: string;
+  /** Every registered platform, best fit first; ties broken by name. */
+  ranked: PlatformFit[];
+  /** Best-fitting platform this report has NOT been posted to yet, or null. */
+  bestUntried: PlatformFit | null;
+  /** Scalar for scoring.ts's platformSuitability signal. */
+  suitability: number | null;
+  /** Fraction of registered platforms with ANY usable fit, direct or general. */
+  coverage: number;
+}
+
+export interface MatchOptions {
+  thresholds?: Thresholds;
+  sessionCeiling?: number;
+  leadCeiling?: number;
+}
+
+/**
+ * Rank every registered platform for ONE report. Caller supplies
+ * precomputed PlatformWindowStats (from computePlatformStats) rather than
+ * this function recomputing them, so scoring an entire batch of reports
+ * doesn't re-scan published_posts/url_performance/leads once per report.
+ */
+export function matchPlatformsForReport(
+  db: DB,
+  reportUrl: string,
+  stats: PlatformWindowStats[],
+  opts: MatchOptions = {},
+): PlatformMatchResult {
+  const thresholds = opts.thresholds ?? DEFAULT_THRESHOLDS;
+  const sessionCeiling = opts.sessionCeiling ?? 5_000;
+  const leadCeiling = opts.leadCeiling ?? 50;
+  const statsByPlatform = new Map(stats.map(s => [s.platform, s]));
+
+  // Which platforms has THIS report already been posted to, and with which
+  // published URL. Matched through the same alias set computePlatformStats
+  // uses, since the sheet/posting-agents don't agree on one spelling.
+  const triedRows = db.prepare(
+    `SELECT LOWER(platform) AS platform, published_url FROM published_posts
+      WHERE report_url = ? AND platform IS NOT NULL`
+  ).all(reportUrl) as Array<{ platform: string; published_url: string | null }>;
+
+  const ranked: PlatformFit[] = PLATFORMS.map((p): PlatformFit => {
+    const aliases = new Set(platformAliases(p));
+    const triedRow = triedRows.find(r => aliases.has(r.platform));
+    const tried = Boolean(triedRow);
+    const general = statsByPlatform.get(p.name) ?? null;
+
+    // Direct evidence: THIS report's own post on THIS platform — stronger
+    // than the platform-wide average, because it is literally this content.
+    let direct: { sessions: number; leads: number } | null = null;
+    if (tried && triedRow?.published_url) {
+      const perf = db.prepare(
+        `SELECT SUM(sessions) AS sessions FROM url_performance
+          WHERE url = ? AND metric_scope = 'url' AND sessions IS NOT NULL`
+      ).get(triedRow.published_url) as any;
+      const leadRow = db.prepare(
+        `SELECT COUNT(*) AS c FROM leads WHERE LOWER(utm_source) = ? AND report_url = ?`
+      ).get(p.utmSource.toLowerCase(), reportUrl) as any;
+      const hasPerf = perf && perf.sessions !== null && perf.sessions !== undefined;
+      const leads = Number(leadRow?.c ?? 0);
+      if (hasPerf || leads > 0) direct = { sessions: Number(perf?.sessions ?? 0), leads };
+    }
+
+    if (direct) {
+      const fit = Math.max(logNormalise(direct.sessions, sessionCeiling), logNormalise(direct.leads, leadCeiling));
+      return {
+        platform: p.name, tried, evidence: 'direct',
+        sessionsPerPost: direct.sessions, leadsPerPost: direct.leads, fit,
+        reason: `this report's own post here: ${direct.sessions} session(s), ${direct.leads} lead(s)`,
+      };
+    }
+
+    const hasGeneralTrack = general !== null
+      && general.posts >= thresholds.platformMinimumSample
+      && (general.sessionsPerPost !== null || general.leadsPerPost !== null);
+
+    if (hasGeneralTrack && general) {
+      const fit = Math.max(
+        general.sessionsPerPost !== null ? logNormalise(general.sessionsPerPost, sessionCeiling) : 0,
+        general.leadsPerPost !== null ? logNormalise(general.leadsPerPost, leadCeiling) : 0,
+      );
+      return {
+        platform: p.name, tried, evidence: 'general',
+        sessionsPerPost: general.sessionsPerPost, leadsPerPost: general.leadsPerPost, fit,
+        reason: tried
+          ? 'already posted here; no performance data for this specific post yet — showing the platform\'s general track record'
+          : `not yet tried for this report; platform's general track record: ${general.sessionsPerPost?.toFixed(2) ?? '0'} sessions/post`,
+      };
+    }
+
+    return {
+      platform: p.name, tried, evidence: 'none',
+      sessionsPerPost: general?.sessionsPerPost ?? null, leadsPerPost: general?.leadsPerPost ?? null, fit: null,
+      reason: tried
+        ? 'already posted here; not enough data yet to judge it'
+        : `insufficient data — only ${general?.posts ?? 0} post(s) platform-wide (need ${thresholds.platformMinimumSample})`,
+    };
+  }).sort((a, b) => (b.fit ?? -1) - (a.fit ?? -1) || a.platform.localeCompare(b.platform));
+
+  const bestUntried = ranked.find(r => !r.tried && r.fit !== null) ?? null;
+  const coverage = ranked.length === 0 ? 0 : ranked.filter(r => r.fit !== null).length / ranked.length;
+
+  return { reportUrl, ranked, bestUntried, suitability: bestUntried?.fit ?? null, coverage };
+}
+
+/** Human-readable ranked list for the CLI. */
+export function formatPlatformMatchReport(result: PlatformMatchResult): string {
+  const lines = [
+    `Platform fit for ${result.reportUrl}`,
+    result.bestUntried
+      ? `Best untried platform: ${result.bestUntried.platform} (fit ${result.bestUntried.fit!.toFixed(2)}) — ${result.bestUntried.reason}`
+      : 'No untried platform currently has enough data to recommend one.',
+    '',
+  ];
+  for (const r of result.ranked) {
+    const fitStr = r.fit === null ? '—' : r.fit.toFixed(2);
+    lines.push(`  ${r.platform.padEnd(16)} fit=${fitStr.padStart(4)}  ${(r.tried ? 'tried' : 'untried').padEnd(8)}  (${r.evidence})  ${r.reason}`);
+  }
+  lines.push('');
+  lines.push(`Coverage: ${(result.coverage * 100).toFixed(0)}% of platforms have enough data to judge.`);
+  lines.push('"—" means not enough data to judge, never zero. Advisory only — nothing here posts or reorders automatically.');
+  return lines.join('\n');
+}
+
 export function persistPlatformStats(db: DB, stats: PlatformWindowStats[]): number {
   let n = 0;
   for (const s of stats) {
