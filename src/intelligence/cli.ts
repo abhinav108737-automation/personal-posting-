@@ -54,6 +54,7 @@ import { ingestFromSheet, mappingCoverage } from './urlMapping.js';
 import { collectGsc } from './collectors/gsc.js';
 import { collectGa4 } from './collectors/ga4.js';
 import { collectPipedrive } from './collectors/pipedrive.js';
+import { looksLikeSourceExport, importSourceExport } from './collectors/sourceImport.js';
 import { importManualExportFile, type ManualImportSource } from './collectors/manualImport.js';
 import { buildDashboardData, writeDashboard } from './dashboard.js';
 import { describeSheetConfig, KEN_ENV } from '../config/sheetIds.js';
@@ -460,6 +461,18 @@ async function cmdImportPerformance(args: ParsedArgs, out: Out): Promise<number>
 
     const source: ManualImportSource = sourceFlag === 'ga4' ? 'ga4-manual' : 'gsc-manual';
     const domain = flagStr(args, 'domain');
+    if (sourceFlag === 'ga4') {
+      const text = fs.readFileSync(file, 'utf8');
+      if (looksLikeSourceExport(text)) {
+        const r = importSourceExport(h.db, text, date);
+        out.log('Detected a GA4 "Session source" export (per-platform traffic).');
+        out.log(`Parsed ${r.rowsParsed} source row(s), wrote ${r.rowsWritten} distinct source(s).`);
+        out.log('Sessions matched to platforms:');
+        for (const [k, v] of Object.entries(r.matchedPlatforms).sort((a, b) => b[1] - a[1])) out.log(`  ${k.padEnd(16)} ${v}`);
+        out.log(`Sessions from sources that match no platform (direct, google, etc.): ${r.unmatchedSessions}`);
+        return 0;
+      }
+    }
     const result = importManualExportFile(h.db, file, { source, metricDate: date, ...(domain ? { domain } : {}) });
 
     out.log(`Matched columns: ${JSON.stringify(result.matchedColumns)}`);
