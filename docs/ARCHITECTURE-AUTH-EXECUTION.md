@@ -14,14 +14,15 @@ inferred.
 
 ---
 
-## 1. Production execution location — UNKNOWN
+## 1. Production execution location — ANSWERED (2026-11-18), with an open risk
 
-**The machine that runs the production scheduler has not been identified and
-must be confirmed by the project owner before any deployment, database siting,
-or state-migration decision is made.**
+**Pranav confirmed, 2026-11-18:** the daemon runs on **Pranav's own Windows
+laptop**, from a **git checkout with no auto-pull**. Account sessions and
+credentials live in **OneDrive**; code backup is **GitHub, but stale**.
 
 What was checked on this machine (`c:\Users\Abhinav\personal-posting-`) on
-2026-11-13:
+2026-11-13, for contrast — this machine is a development clone, not
+production:
 
 | Check | Result |
 |---|---|
@@ -33,21 +34,24 @@ What was checked on this machine (`c:\Users\Abhinav\personal-posting-`) on
 | Windows scheduled task for the daemon | None found |
 | Other copies of `scheduler-new.ts` on this disk | None |
 
-**Conclusion: this machine is a development clone, not production.** The
-production daemon runs somewhere else.
+**What this means for deployment:**
 
-Open questions for the project owner:
+- **Merging PR #1 does NOT make it live.** No auto-pull means Pranav must
+  manually `git pull` (or merge locally) on his laptop and restart the
+  daemon process himself, every time.
+- **Single point of failure, not yet a verified one.** Everything — the
+  live daemon, its sessions, its credentials — is on one person's laptop.
+  OneDrive sync is assumed to cover sessions/credentials, but **has not been
+  tested as a restore** (i.e. no one has proven that wiping the laptop and
+  restoring from OneDrive actually brings the daemon back up). The GitHub
+  copy, the other half of the safety net, is **known stale** — so right now
+  neither backup path is confirmed to work if that laptop is lost.
 
-1. Which machine runs the daemon (another workstation, a VPS, a server)?
-2. Is it a git checkout that pulls, or a manually copied folder?
-3. Is its disk backed up, and by what?
-4. Who has access to it?
-
-Until these are answered:
-
-- No deployment of Milestone 0 changes to production.
-- No decision on where a future SQLite database lives (Milestone 3).
-- No assumption that this repository's state layout matches production's.
+**Recommended next step (not yet done):** a real restore test — confirm the
+OneDrive copy of `.accounts/`/`.sessions/` is current and actually restorable,
+and bring the GitHub mirror up to date (push whatever Pranav's laptop has that
+GitHub doesn't). Until that happens, this project has no proven disaster
+recovery.
 
 ---
 

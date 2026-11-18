@@ -103,20 +103,24 @@ GA4. It can be switched on first, last, or alone.
 
 ---
 
-## 4. Still unanswered — where production runs
+## 4. Answered — where production runs, and the risk it exposed
 
-Recorded as **UNKNOWN** in `docs/ARCHITECTURE-AUTH-EXECUTION.md`.
+Pranav confirmed, 2026-11-18: the daemon runs on **his own Windows laptop**,
+from a **git checkout with no auto-pull**. Full detail in
+`docs/ARCHITECTURE-AUTH-EXECUTION.md`, section 1.
 
-This laptop is a development clone: before this work it had no `node_modules`,
-no `.env`, no `.accounts/`, no `.sessions/` and no running scheduler.
+**What this changes:**
+- Merging PR #1 is not deployment. Pranav has to manually pull/merge on his
+  laptop and restart the daemon for any change — including everything in
+  this PR — to actually go live.
+- Sessions/credentials are backed up to OneDrive, **sync/restore unverified**.
+  The GitHub code copy is **stale**. Right now, if that one laptop is lost,
+  neither backup path is proven to bring the system back.
 
-**Ask Pranav:**
-1. Which machine runs the posting daemon?
-2. Is it a git checkout that pulls, or a manually copied folder?
-3. Is its disk backed up?
-
-Until this is answered, nothing can be deployed and the production database
-location cannot be decided.
+**New action item, not yet done:** run an actual restore test (confirm the
+OneDrive backup is current and restorable) and push Pranav's laptop state to
+GitHub so the code mirror stops being stale. This is now the top open risk —
+bigger than any of the credential items below.
 
 ---
 
@@ -156,9 +160,11 @@ any intelligence feature:
 
 ## Suggested order
 
-1. **GA4** — biggest single unlock, data already exists, answers the platform question
-2. **Search Console** — adds ranking signals
-3. **Pipedrive** — connects everything to leads
-4. **Production machine details** — needed before any deployment
+1. **Verify the OneDrive restore + push the stale GitHub mirror** — this is
+   now the biggest risk: one laptop, one unverified backup. Do this first.
+2. **GA4** — biggest single data unlock, data already exists, answers the platform question
+3. **Search Console** — adds ranking signals
+4. **Pipedrive** — connects everything to leads
+5. **Merge PR #1, then have Pranav manually pull + restart the daemon** — merging alone does not deploy it
 
 Items 1–3 are independent. None blocks the others.
