@@ -202,7 +202,7 @@ function outcomeFor(
   }
   const r = db.prepare(
     `SELECT COALESCE(SUM(sessions), 0) AS v FROM url_performance
-      WHERE url = ? AND source = 'ga4' AND metric_scope = 'url'
+      WHERE url = ? AND source IN ('ga4','ga4-manual') AND metric_scope = 'url'
         AND metric_date > ? AND metric_date <= ?`
   ).get(row.report_url, b.afterDate, b.untilDate) as any;
   return Number(r?.v ?? 0);

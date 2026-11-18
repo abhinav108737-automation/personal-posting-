@@ -47,6 +47,25 @@ describe('normaliseExportUrl', () => {
 });
 
 describe('parseManualExport', () => {
+  test('skips the "# ---" comment preamble GA4 puts above the header, and the Grand total row', () => {
+    const csv = [
+      '# ----------------------------------------',
+      '# Ken Research - GA4',
+      '# Pages and screens-Free form 4',
+      '# 20260820-20261117',
+      '# ----------------------------------------',
+      '',
+      'Page path and screen class,Sessions,Engaged sessions',
+      ',667073,285127,Grand total',
+      '/africa-cashew-market,11,2',
+    ].join('\n');
+    const res = parseManualExport(csv, { source: 'ga4-manual', metricDate: '2026-11-17' }) as any;
+    assert.equal(res.rows.length, 1);
+    assert.equal(res.rows[0].url, 'https://www.kenresearch.com/africa-cashew-market');
+    assert.equal(res.rows[0].sessions, 11);
+    assert.equal(res.rows[0].engaged_sessions, 2);
+  });
+
   test('parses a GSC-style "Pages" export', () => {
     const csv = [
       'Top pages,Clicks,Impressions,CTR,Position',

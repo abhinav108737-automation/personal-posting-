@@ -208,13 +208,13 @@ export function gatherSignals(opts: GatherOptions): SignalSet {
   const gsc = db.prepare(
     `SELECT SUM(impressions) AS impressions, SUM(clicks) AS clicks, AVG(position) AS position
        FROM url_performance
-      WHERE url = ? AND source = 'gsc' AND metric_date >= ? AND metric_scope = 'url'`
+      WHERE url = ? AND source IN ('gsc','gsc-manual') AND metric_date >= ? AND metric_scope = 'url'`
   ).get(reportUrl, since) as any;
 
   const ga4 = db.prepare(
     `SELECT SUM(sessions) AS sessions
        FROM url_performance
-      WHERE url = ? AND source = 'ga4' AND metric_date >= ? AND metric_scope = 'url'`
+      WHERE url = ? AND source IN ('ga4','ga4-manual') AND metric_date >= ? AND metric_scope = 'url'`
   ).get(reportUrl, since) as any;
 
   const leadRow = db.prepare(

@@ -149,7 +149,20 @@ export interface ParseManualExportOptions {
 }
 
 export function parseManualExport(csvText: string, opts: ParseManualExportOptions): ManualImportResult {
-  const table = parseCsv(csvText);
+  // GA4 exports begin with a "# ----" comment preamble (property name, report
+  // name, date range) and a blank line before the real header row. Drop those
+  // leading lines so the header row is what the column matcher sees.
+  const stripped = csvText
+    .replace(/^\uFEFF/, '')
+    .split(/\r?\n/)
+    .reduce<{ lines: string[]; inPreamble: boolean }>((acc, line) => {
+      if (acc.inPreamble && (line.startsWith('#') || line.trim() === '')) return acc;
+      acc.inPreamble = false;
+      acc.lines.push(line);
+      return acc;
+    }, { lines: [], inPreamble: true })
+    .lines.join('\n');
+  const table = parseCsv(stripped);
   const result: ManualImportResult = {
     rowsParsed: 0, rowsSkipped: 0, rowsWritten: 0, skippedReasons: [], matchedColumns: {},
   };
