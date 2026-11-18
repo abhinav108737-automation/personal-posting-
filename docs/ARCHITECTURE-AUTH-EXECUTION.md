@@ -41,17 +41,31 @@ production:
   daemon process himself, every time.
 - **Single point of failure, not yet a verified one.** Everything — the
   live daemon, its sessions, its credentials — is on one person's laptop.
-  OneDrive sync is assumed to cover sessions/credentials, but **has not been
-  tested as a restore** (i.e. no one has proven that wiping the laptop and
-  restoring from OneDrive actually brings the daemon back up). The GitHub
-  copy, the other half of the safety net, is **known stale** — so right now
-  neither backup path is confirmed to work if that laptop is lost.
+  Two separate backup gaps, **neither fixed by the other**:
+  1. **Code** (this repository) is backed up to GitHub, but that mirror is
+     **stale** — Pranav's laptop has commits/state GitHub doesn't.
+  2. **Sessions and credentials** (`.accounts/`, `.sessions/`) are backed up
+     to OneDrive — but that backup has **never been tested as a restore**
+     (no one has proven that wiping the laptop and restoring from OneDrive
+     actually brings the daemon back up with working logins).
 
-**Recommended next step (not yet done):** a real restore test — confirm the
-OneDrive copy of `.accounts/`/`.sessions/` is current and actually restorable,
-and bring the GitHub mirror up to date (push whatever Pranav's laptop has that
-GitHub doesn't). Until that happens, this project has no proven disaster
-recovery.
+  **These two must stay separate.** Sessions/credentials are sensitive and
+  must never go to GitHub (or anywhere else shared/public) — this repo's
+  `.gitignore` already blocks `.accounts/`, `.sessions/`, and `.env` from
+  ever being committed, on purpose. OneDrive (private, already restricted to
+  the account that needs it) is the right place for that data; GitHub is
+  only ever the right place for code.
+
+**Recommended next step (not yet done), two separate actions:**
+1. **Code:** push Pranav's laptop's code state to GitHub so that mirror
+   stops being stale — ordinary `git push`, nothing sensitive in it.
+2. **Credentials/sessions:** a *local* restore drill, with nothing leaving
+   OneDrive/the laptop — e.g. copy the OneDrive `.accounts/`/`.sessions/`
+   folders to a fresh temp directory (or a second machine, if one exists)
+   and confirm the daemon can actually log in and run from that copy. This
+   proves the backup works without ever uploading credentials anywhere.
+
+Until both happen, this project has no proven disaster recovery.
 
 ---
 

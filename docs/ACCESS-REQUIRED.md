@@ -113,14 +113,19 @@ from a **git checkout with no auto-pull**. Full detail in
 - Merging PR #1 is not deployment. Pranav has to manually pull/merge on his
   laptop and restart the daemon for any change — including everything in
   this PR — to actually go live.
-- Sessions/credentials are backed up to OneDrive, **sync/restore unverified**.
-  The GitHub code copy is **stale**. Right now, if that one laptop is lost,
-  neither backup path is proven to bring the system back.
+- Two separate backup gaps, each needs its own fix — **do not mix these up,
+  credentials must never go to GitHub:**
+  - **Code** backup is GitHub, and it's **stale** (Pranav's laptop has state
+    GitHub doesn't). Fix: an ordinary `git push` of whatever's ahead.
+  - **Sessions/credentials** backup is OneDrive — fine as the location
+    (private, already scoped to the right account), but the **restore has
+    never been tested**. Fix: a *local* restore drill — copy the OneDrive
+    `.accounts/`/`.sessions/` folders to a fresh temp folder (or spare
+    machine) and confirm the daemon actually logs in from that copy. Nothing
+    here should ever touch GitHub or any shared/public location.
 
-**New action item, not yet done:** run an actual restore test (confirm the
-OneDrive backup is current and restorable) and push Pranav's laptop state to
-GitHub so the code mirror stops being stale. This is now the top open risk —
-bigger than any of the credential items below.
+**New action item, not yet done:** both of the above, kept separate. This is
+now the top open risk — bigger than any of the credential-access items below.
 
 ---
 
@@ -160,8 +165,11 @@ any intelligence feature:
 
 ## Suggested order
 
-1. **Verify the OneDrive restore + push the stale GitHub mirror** — this is
-   now the biggest risk: one laptop, one unverified backup. Do this first.
+1. **Fix the two backup gaps — kept separate, credentials never leave OneDrive:**
+   push the stale GitHub code mirror up to date (ordinary git push, code
+   only), and separately run a local OneDrive restore drill for
+   `.accounts/`/`.sessions/` (copy to a temp folder, confirm login works —
+   nothing uploaded anywhere). This is now the biggest risk. Do this first.
 2. **GA4** — biggest single data unlock, data already exists, answers the platform question
 3. **Search Console** — adds ranking signals
 4. **Pipedrive** — connects everything to leads
