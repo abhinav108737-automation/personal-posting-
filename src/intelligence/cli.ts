@@ -54,6 +54,7 @@ import { ingestFromSheet, mappingCoverage } from './urlMapping.js';
 import { collectGsc } from './collectors/gsc.js';
 import { collectGa4 } from './collectors/ga4.js';
 import { collectPipedrive } from './collectors/pipedrive.js';
+import { importV02Indexation } from './collectors/v02Indexation.js';
 import { looksLikeSourceExport, importSourceExport } from './collectors/sourceImport.js';
 import { importManualExportFile, type ManualImportSource } from './collectors/manualImport.js';
 import { buildDashboardData, writeDashboard } from './dashboard.js';
@@ -93,7 +94,7 @@ export interface ParsedArgs {
 }
 
 /** Flags that consume the following token when not written as --name=value. */
-export const VALUE_FLAGS = new Set([
+export const VALUE_FLAGS = new Set(['v02-db', 
   'db', 'days', 'limit', 'tab', 'by', 'start', 'end', 'platform', 'site', 'reason',
   'file', 'source', 'date', 'domain', 'out', 'inbox',
 ]);
@@ -484,6 +485,23 @@ async function cmdImportPerformance(args: ParsedArgs, out: Out): Promise<number>
       if (result.skippedReasons.length > 20) out.log(`  ... and ${result.skippedReasons.length - 20} more`);
     }
     return result.rowsWritten > 0 || result.rowsParsed === 0 ? 0 : 1;
+  } finally {
+    release(h);
+  }
+}
+
+/** import-v02-indexation: reuse V0.2's Google URL Inspection verdicts (read-only, no quota). */
+async function cmdImportV02Indexation(args: ParsedArgs, out: Out): Promise<number> {
+  const dbPath = flagStr(args, 'v02-db');
+  if (!dbPath) { out.log('Usage: intel import-v02-indexation --v02-db <path to V0.2 state.db>'); return 1; }
+  if (!fs.existsSync(dbPath)) { out.log(`File not found: ${dbPath}`); return 1; }
+  const h = openHandle(args);
+  try {
+    const r = importV02Indexation(h.db, dbPath);
+    out.log(`Tracked reports: ${r.trackedReports}; matched in V0.2: ${r.matched}.`);
+    out.log(`Recorded: ${r.recorded.indexed} indexed, ${r.recorded.not_indexed} not indexed. Skipped (no verdict yet): ${r.skipped}.`);
+    out.log('V0.2 state.db was opened read-only; no inspection quota was used.');
+    return 0;
   } finally {
     release(h);
   }
@@ -1022,6 +1040,7 @@ export const COMMANDS = [
   ['status', 'Flags, database, schema version, row counts, and MISSING credentials'],
   ['migrate', 'Apply pending database migrations'],
   ['collect', 'Run the collectors that have credentials; say why the others were skipped'],
+  ['import-v02-indexation', 'Reuse the V0.2 project Google URL Inspection verdicts for tracked reports (read-only, no quota)'],
   ['import-performance', 'Load a GA4/GSC CSV export you downloaded yourself — no credentials needed'],
   ['ingest', 'Read the distribution sheet (--live reads the REAL tabs read-only)'],
   ['export', 'Append a dated snapshot into the Test_ tracking tabs in the sheet'],
@@ -1095,6 +1114,7 @@ export async function runCli(argv: string[], options: RunOptions = {}): Promise<
       case 'migrate': return await cmdMigrate(args, out);
       case 'collect': return await cmdCollect(args, out, env);
       case 'import-performance': return await cmdImportPerformance(args, out);
+      case 'import-v02-indexation': return await cmdImportV02Indexation(args, out);
       case 'ingest': return await cmdIngest(args, out);
       case 'index-check':
       case 'index': return await cmdIndexCheck(args, out);
